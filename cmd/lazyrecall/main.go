@@ -106,6 +106,8 @@ func run(args []string) error {
 		return cmdName(global, noRefresh, rest)
 	case "star":
 		return cmdStar(global, noRefresh, rest)
+	case "export":
+		return cmdExport(global, noRefresh, rest)
 	case "refresh":
 		return cmdRefresh(global, rest)
 	case "doctor":
@@ -144,6 +146,7 @@ Usage:
   lazyrecall unarchive SESSION_ID
   lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
   lazyrecall name      SESSION_ID TEXT... | SESSION_ID --clear
+  lazyrecall export    SESSION_ID [--format=md|json] [--clean] [--no-redact] [--output=FILE]
   lazyrecall star      SESSION_ID [--clear] | list
   lazyrecall refresh   [--full]
   lazyrecall doctor
@@ -1202,6 +1205,72 @@ func cmdStar(global *flag.FlagSet, noRefresh *bool, args []string) error {
 		fmt.Printf("%s -> starred\n", rest[0])
 	}
 	return nil
+}
+
+// cmdExport implements `lazyrecall export SESSION_ID [--format=md|json]
+// [--clean] [--no-redact] [--output=FILE]`: it renders a session's whole
+// conversation to stdout, or to a file, through the renderer T14 added
+// (cli.WriteMarkdown / cli.WriteJSON). Redaction is on by default because a
+// transcript routinely carries credentials; --no-redact is the explicit opt
+// out. The output path is opened with 0o600 - a transcript is private, and
+// the file is truncated on each run so a shorter export never leaves a
+// longer one's tail behind. SESSION_ID is resolved with resolveItem, exactly
+// like archive/group/name/star, so the short handle, the full composite id,
+// and an unambiguous prefix of either all work.
+func cmdExport(global *flag.FlagSet, noRefresh *bool, args []string) error {
+	format := global.String("format", "md", "output format: md or json")
+	clean := global.Bool("clean", false, "render the cleaned question/answer view")
+	noRedact := global.Bool("no-redact", false, "leave credentials in the output")
+	output := global.String("output", "", "write to FILE instead of stdout")
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: lazyrecall export SESSION_ID [--format=md|json] [--clean] [--no-redact] [--output=FILE]")
+	}
+	if *format != "md" && *format != "json" {
+		return fmt.Errorf("--format must be md or json")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
+	}
+	item, err := resolveItem(db, cfg, rest[0])
+	if err != nil {
+		return err
+	}
+	if item.TranscriptGone {
+		return fmt.Errorf("this session's transcript file no longer exists")
+	}
+
+	installs, err := profile.Discover()
+	if err != nil {
+		return err
+	}
+	turns, err := cli.LoadConversation(item, installs, cli.ExportLimits)
+	if err != nil {
+		return err
+	}
+
+	var w io.Writer = os.Stdout
+	if *output != "" {
+		f, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	if *format == "json" {
+		return cli.WriteJSON(w, item, turns, *clean, !*noRedact)
+	}
+	return cli.WriteMarkdown(w, item, turns, *clean, !*noRedact)
 }
 
 // cmdDoctor implements `lazyrecall doctor`: a read-only health report over
