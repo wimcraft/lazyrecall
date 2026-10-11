@@ -1538,6 +1538,7 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 		Client:  *ff.client,
 		Query:   query,
 		Style:   os.Getenv("NO_COLOR") == "",
+		Version: version,
 		// The browser opens under the same hide rules the non-interactive
 		// commands use, and starts showing everything when the user asked
 		// for it either on this command line or in the config file - the

@@ -65,6 +65,12 @@ type BrowserOptions struct {
 	Client string
 	Query  string
 	Style  bool // NO_COLOR-aware: suppress all styling when the environment asks
+	// Version is the build's version string (cmd/lazyrecall's version
+	// variable, also printed by `lazyrecall --version`), shown in the help
+	// overlay so a browser session says which build is running. Empty - the
+	// zero value, and what every test leaves it at - renders the title
+	// without it, exactly as the overlay always did.
+	Version string
 
 	// ShowAll opens the browser with the hide rules and the archive flag
 	// disabled - "show me everything". The caller seeds it from the config
@@ -389,10 +395,13 @@ func (m inputMode) prompt() string {
 // browseModel is the running state of the browser. Everything here lives in
 // the process; nothing is written to disk for coordination.
 type browseModel struct {
-	db     *sqlitex.Runner
-	style  bool
-	width  int
-	height int
+	db    *sqlitex.Runner
+	style bool
+	// version is BrowserOptions.Version: what the help overlay's title
+	// reports as the running build ("" renders the title without it).
+	version string
+	width   int
+	height  int
 
 	focus panelID
 
@@ -573,6 +582,7 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 	m := browseModel{
 		db:             opts.DB,
 		style:          opts.Style,
+		version:        opts.Version,
 		showAll:        opts.ShowAll,
 		hide:           opts.Hide,
 		group:          opts.Group,
@@ -3430,7 +3440,11 @@ var browseActions = []browseAction{
 
 func (m browseModel) helpView() string {
 	var b strings.Builder
-	b.WriteString(style("lazyrecall - key bindings", ansiBold, m.style) + "\n\n")
+	title := "lazyrecall - key bindings"
+	if m.version != "" {
+		title = "lazyrecall " + m.version + " - key bindings"
+	}
+	b.WriteString(style(title, ansiBold, m.style) + "\n\n")
 	for _, a := range browseActions {
 		fmt.Fprintf(&b, "  %-14s %s%s\n", a.key, a.helpText(), a.scope())
 	}
