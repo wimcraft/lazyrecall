@@ -6,10 +6,12 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +88,8 @@ func run(args []string) error {
 		return cmdReview(global, jsonFlag, allFlag, noRefresh, rest)
 	case "resume":
 		return cmdResume(global, jsonFlag, noRefresh, rest)
+	case "new":
+		return cmdNew(global, rest)
 	case "browse":
 		return cmdBrowse(global, allFlag, noRefresh, rest)
 	case "comment":
@@ -132,7 +136,8 @@ Usage:
   lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--since=DAYS] [--all] [--json]
   lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all] [--json]
   lazyrecall review    [--group=NAME] [--all] [--json]
-  lazyrecall resume    [SESSION_ID|PREFIX|.] [--last] [--repo=PATH] [--agent=NAME] [--client=NAME] [--tag=NAME] [--group=NAME]
+  lazyrecall resume    [SESSION_ID|PREFIX|.] [--last] [--repo=PATH] [--agent=NAME] [--client=NAME] [--tag=NAME] [--group=NAME] [--model=M]
+  lazyrecall new       --agent=NAME [--cwd=PATH] [--model=M] [--prompt=TEXT] [--name=TEXT] [--mkdir]
   lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
   lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
   lazyrecall archive   SESSION_ID | list
@@ -528,6 +533,7 @@ func cmdReview(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []
 func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) error {
 	ff := parseFilterFlags(global)
 	last := global.Bool("last", false, "resume the most recently active session directly, with no picker")
+	model := global.String("model", "", "resume in this model (requires the source's model template)")
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -627,6 +633,8 @@ func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) e
 		Resumable:               target.Resumable,
 		TranscriptGone:          target.TranscriptGone,
 		Resume:                  tpl,
+		Model:                   *model,
+		ModelTemplate:           cfg.Sources[target.Source].Model,
 		ProfileEnv:              profileEnv,
 		ProfileUnresolved:       !profileOK,
 		ProfileUnresolvedReason: profileReason,
@@ -703,6 +711,179 @@ func profileEnvFor(cfg config.Config, source, installName string) (env map[strin
 		return map[string]string{envVar: root}, true, ""
 	}
 	return nil, false, fmt.Sprintf("no discovered install named %q", installName)
+}
+
+// cmdNew implements `lazyrecall new --agent=NAME`: the CLI's way to start a
+// brand-new session in a source's agent, in a chosen directory, before
+// anything about it exists on disk. It is the launch counterpart of
+// cmdResume: where resume reconstructs an existing session's argv from
+// cfg.Sources[source].Resume, new builds one from .New/.NewID/.NewName/
+// .Model/.Prompt through resume.Launch. Only --agent, --cwd, --model,
+// --prompt, --name and --mkdir are understood - no tags, comments, or
+// stars, which are annotations on a session that does not exist yet.
+//
+// The install is resolved with resolveAgentFilter, the same helper every
+// listing's --agent goes through, so "new" accepts exactly what "list
+// --agent" accepts. A source name is not enough by itself, though: unlike a
+// filter, a launch has to pick one install to run against, so a source with
+// several discovered installs is refused with the list of them rather than
+// guessing (a session started under the wrong account is not something a
+// later flag can undo).
+func cmdNew(global *flag.FlagSet, args []string) error {
+	agent := global.String("agent", "", "the agent (source, install, or label) to start a session in")
+	cwd := global.String("cwd", "", "the directory to start the session in (default: the current directory)")
+	model := global.String("model", "", "start the session in this model")
+	prompt := global.String("prompt", "", "the session's first prompt")
+	name := global.String("name", "", "the session's name")
+	mkdir := global.Bool("mkdir", false, "create --cwd if it does not exist")
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("usage: lazyrecall new --agent=NAME [--cwd=PATH] [--model=M] [--prompt=TEXT] [--name=TEXT] [--mkdir]")
+	}
+	if *agent == "" {
+		return fmt.Errorf("usage: lazyrecall new --agent=NAME [--cwd=PATH] [--model=M] [--prompt=TEXT] [--name=TEXT] [--mkdir]")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	source, install, err := newSessionTarget(cfg, *agent)
+	if err != nil {
+		return err
+	}
+
+	dir := *cwd
+	if dir == "" {
+		dir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolving current directory: %w", err)
+		}
+	} else {
+		dir, err = filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("resolving %q: %w", *cwd, err)
+		}
+	}
+
+	// A source that can name its own sessions gets an id chosen here rather
+	// than one the agent picks, so the session can be resumed by name the
+	// moment it exists - the whole reason a source configures a NewID
+	// template at all (internal/config: NewID). A source without one leaves
+	// the id empty and simply has no id to announce.
+	id := ""
+	if len(cfg.Sources[source].NewID) > 0 {
+		id, err = newSessionID()
+		if err != nil {
+			return err
+		}
+	}
+
+	env, ok, reason := profileEnvFor(cfg, source, install)
+	if !ok {
+		return fmt.Errorf("could not determine %s's configuration: %s", source, reason)
+	}
+
+	line := fmt.Sprintf("starting %s (%s) in %s", source, install, dir)
+	if id != "" {
+		line += " as session " + id
+	}
+	fmt.Fprintln(os.Stderr, line)
+
+	out := resume.Launch(resume.LaunchTarget{
+		Source:     source,
+		CWD:        dir,
+		Mkdir:      *mkdir,
+		ID:         id,
+		Name:       *name,
+		Model:      *model,
+		Prompt:     *prompt,
+		Templates:  cfg.Sources[source],
+		ProfileEnv: env,
+	})
+	fmt.Println(out.Message)
+	if out.Failed {
+		return errors.New(out.Message)
+	}
+	return nil
+}
+
+// newSessionTarget resolves `new --agent` to exactly one install to launch.
+// It goes through resolveAgentFilter first, so anything that names a filter
+// scope (a configured label, a source name, an install name) resolves the
+// same way it does for a listing; a label or install name already names one
+// install and is returned directly. A source name is the one case a filter
+// leaves ambiguous: it can match several installs, and a launch cannot, so
+// this narrows it to the single discovered install when there is exactly
+// one and refuses with the list when there are several or none.
+func newSessionTarget(cfg config.Config, arg string) (source, install string, err error) {
+	agent, installName := resolveAgentFilter(cfg, arg)
+	if installName != "" {
+		// resolveAgentFilter matched a label or an install name, so arg
+		// already names one install; its source is the one it carries data
+		// for (a Profile always has exactly one).
+		return sourceOfInstall(installName)
+	}
+	source = agent
+	installs, err := profile.Discover()
+	if err != nil {
+		return "", "", fmt.Errorf("discovering installs: %w", err)
+	}
+	var matches []profile.Profile
+	for _, p := range installs {
+		if p.Source() == source {
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", "", fmt.Errorf("no install found for agent %q", arg)
+	case 1:
+		return source, matches[0].Name, nil
+	default:
+		names := make([]string, len(matches))
+		for i, p := range matches {
+			names[i] = p.Name
+		}
+		return "", "", fmt.Errorf("%s has several installs (%s); pass --agent=<install or label>", source, strings.Join(names, ", "))
+	}
+}
+
+// sourceOfInstall resolves a discovered install's own name to the (source,
+// install) pair a launch needs. It is only ever called with a name
+// resolveAgentFilter already matched to a discovered install, so a
+// discovery failure here is unexpected and reported rather than swallowed.
+func sourceOfInstall(name string) (source, install string, err error) {
+	installs, err := profile.Discover()
+	if err != nil {
+		return "", "", fmt.Errorf("discovering installs: %w", err)
+	}
+	for _, p := range installs {
+		if p.Name == name {
+			return p.Source(), name, nil
+		}
+	}
+	return "", "", fmt.Errorf("no install found for agent %q", name)
+}
+
+// newSessionID returns a random UUID v4 in the canonical
+// "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx" text form, for a source whose
+// NewID template lets LazyRecall choose the new session's id. crypto/rand,
+// not math/rand: an id a user quotes to resume or share must not be
+// predictable from a previously seen one. The version nibble is forced to 4
+// and the variant bits to the RFC 4122 "10" pattern, so the value reads as a
+// genuine v4 to the agent that parses it.
+func newSessionID() (string, error) {
+	var b [16]byte
+	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
+		return "", fmt.Errorf("generating session id: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 func cmdComment(global *flag.FlagSet, noRefresh *bool, args []string) error {
@@ -1284,6 +1465,21 @@ func showConfig(cfg config.Config) error {
 		values["sources."+name+".roots"] = cfg.Sources[name].Roots
 		values["sources."+name+".resume"] = cfg.Sources[name].Resume
 		values["sources."+name+".env_var"] = cfg.Sources[name].EnvVar
+		// The new-session templates are shown only when non-empty, like
+		// every other optional per-source key: a source with no model flag
+		// (hermes, goose, ...) would otherwise print four empty rows
+		// identical to "not configured", hiding the one fact worth seeing.
+		for key, tpl := range map[string][]string{
+			"sources." + name + ".new":      cfg.Sources[name].New,
+			"sources." + name + ".new_id":   cfg.Sources[name].NewID,
+			"sources." + name + ".new_name": cfg.Sources[name].NewName,
+			"sources." + name + ".model":    cfg.Sources[name].Model,
+			"sources." + name + ".prompt":   cfg.Sources[name].Prompt,
+		} {
+			if len(tpl) > 0 {
+				values[key] = tpl
+			}
+		}
 	}
 	// Groups have no default entry to fall back on - only a config file
 	// puts one there - so with none configured, no "groups.*" key appears
