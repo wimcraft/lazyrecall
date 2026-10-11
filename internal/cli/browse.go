@@ -720,7 +720,7 @@ func (m *browseModel) rebuild() {
 // give, which is meaningless if the count is already restricted to
 // whichever group is currently selected (the same reason Agents' own rows
 // exclude the Agent dimension - see rebuild's comment on corpus).
-func (m browseModel) groupCountsFromItems() (all, archive, unknown int, byGroup map[string]int) {
+func (m browseModel) groupCountsFromItems() (all, archive, starred, unknown int, byGroup map[string]int) {
 	items := m.applyTextFilter(narrow(m.groupItems, m.agents.Sel, m.agentSource, m.repos.Sel, m.tags.Sel))
 	byGroup = map[string]int{}
 	for _, it := range items {
@@ -729,6 +729,13 @@ func (m browseModel) groupCountsFromItems() (all, archive, unknown int, byGroup 
 			continue
 		}
 		all++
+		// Starred is counted over the same non-archived set All is, because
+		// the "starred" view excludes archived sessions (search.Filter's
+		// Group doc comment): a starred-but-archived session must not
+		// advertise a Starred row that would then list nothing.
+		if it.Starred {
+			starred++
+		}
 		if it.Group == "" {
 			unknown++
 		} else {
@@ -752,15 +759,26 @@ func (m browseModel) groupCountsFromItems() (all, archive, unknown int, byGroup 
 // relative to, exactly like the "all" row of any other facet), and the
 // currently selected row is never hidden even at zero - clearing a
 // selection that narrowed its own row out of existence must stay reachable
-// from the panel that applied it. Zero config keeps its existing shape
+// from the panel that applied it. Starred follows All's cross-cutting
+// placement and Archive's visibility rule: shown when it has items or is
+// selected, at either position, so it is neither a configured group's peer
+// nor lost when the config is empty. Zero config keeps its existing shape
 // otherwise: All, plus Archive only when it (now filter-aware) is nonzero
 // or selected; Unknown stays hidden in the zero-groups case even when
 // nonzero, since with no groups configured every non-archived session lands
 // in Unknown and a row for it would only duplicate All.
 func (m browseModel) groupRows() []facetRow {
-	all, archive, unknown, byGroup := m.groupCountsFromItems()
+	all, archive, starred, unknown, byGroup := m.groupCountsFromItems()
 
 	rows := []facetRow{{Value: "", Label: "All", Count: all}}
+	// Starred sits directly under All, ahead of every configured group: it
+	// is a cross-cutting view like All, not a group, so grouping it with the
+	// configured names would make it read as one of them. It is counted
+	// over the non-archived corpus (groupCountsFromItems), just as the
+	// "starred" filter's own view is.
+	if starred > 0 || m.group == "starred" {
+		rows = append(rows, facetRow{Value: "starred", Label: "Starred", Count: starred})
+	}
 	if len(m.groups) == 0 {
 		if archive > 0 || m.group == "archive" {
 			rows = append(rows, facetRow{Value: "archive", Label: "Archive", Count: archive})
@@ -1170,6 +1188,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startRenameInput()
 	case "a":
 		m.toggleArchive()
+	case "*":
+		m.toggleStar()
 	case ".":
 		m.toggleShowAll()
 	}
@@ -1542,6 +1562,38 @@ func (m *browseModel) toggleArchive() {
 	// The row's archive state changed but the corpus is otherwise intact,
 	// so the notice is what says what happened before the reload hides or
 	// marks the row.
+	m.notice = fmt.Sprintf("%s %s.", verb, it.SessionID)
+	m.detailOf = ""
+	m.loadAll()
+}
+
+// toggleStar stars the selected session if it is unstarred and unstars it
+// if it is starred, then reloads so the row's ★ marker and the Groups
+// panel's Starred row are redrawn. The star is a decision the user made,
+// stored on the durable lineage exactly like the archive flag, so a full
+// index rebuild cannot undo it. Without a session selected there is nothing
+// to act on, and the key does nothing.
+func (m *browseModel) toggleStar() {
+	it := m.current()
+	if it == nil {
+		return
+	}
+	starred, err := annotate.IsStarred(m.db, it.LineageID)
+	if err != nil {
+		m.notice = "star: " + err.Error()
+		return
+	}
+	verb := "starred"
+	if err := annotate.SetStarred(m.db, it.LineageID, !starred, time.Now()); err != nil {
+		m.notice = "star: " + err.Error()
+		return
+	}
+	if starred {
+		verb = "unstarred"
+	}
+	// The row's star changed but the corpus is otherwise intact, so the
+	// notice is what says what happened before the reload redraws the row
+	// and the Groups panel's Starred count.
 	m.notice = fmt.Sprintf("%s %s.", verb, it.SessionID)
 	m.detailOf = ""
 	m.loadAll()
@@ -3229,6 +3281,7 @@ var browseActions = []browseAction{
 	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
 	{key: "r", label: "rename", help: "set or clear lazyrecall's own name for the selected session (blank clears it)"},
 	{key: "a", label: "archive", help: "archive/unarchive the selected session", footer: true},
+	{key: "*", label: "star", help: "star/unstar the selected session", footer: true},
 	{key: ".", label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
 	{key: "?", label: "keys", help: "this list", footer: true},
 	{key: "q, Ctrl-C", label: "quit", footer: true},

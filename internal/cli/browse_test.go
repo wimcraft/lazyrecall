@@ -1512,6 +1512,158 @@ func TestArchiveWithNoSelectionDoesNothing(t *testing.T) {
 	}
 }
 
+// "*" stars the selected session and "*" again unstars it. With showAll on
+// the row stays put across the toggle, so the second press is unambiguously
+// about the same session.
+func TestStarKeyToggles(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		ShowAll: true, Installs: testInstalls("claude-personal"),
+	})
+	m = update(t, m, keyRunes("0"))
+	it := m.visible[0]
+	target := it.LineageID
+
+	m = update(t, m, keyRunes("*"))
+	if got, err := annotate.IsStarred(m.db, target); err != nil {
+		t.Fatal(err)
+	} else if !got {
+		t.Fatal("* did not star the selected session")
+	}
+	if want := fmt.Sprintf("starred %s.", it.SessionID); m.notice != want {
+		t.Errorf("notice = %q, want %q", m.notice, want)
+	}
+	if want := fmt.Sprintf("#%d%s", it.Handle, starGlyph); !strings.Contains(m.View(), want) {
+		t.Errorf("a starred session's row does not show %q: %q", want, m.View())
+	}
+
+	m = update(t, m, keyRunes("*"))
+	if got, err := annotate.IsStarred(m.db, target); err != nil {
+		t.Fatal(err)
+	} else if got {
+		t.Fatal("* did not unstar the selected session")
+	}
+	if want := fmt.Sprintf("unstarred %s.", it.SessionID); m.notice != want {
+		t.Errorf("notice = %q, want %q", m.notice, want)
+	}
+	if strings.Contains(m.View(), starGlyph) {
+		t.Error("the ★ marker is still drawn after the session was unstarred")
+	}
+}
+
+// "*" with no session selected does nothing and must not panic - the empty
+// profile is a real, reachable state, not a test-only corner.
+func TestStarWithNoSelectionDoesNothing(t *testing.T) {
+	m := newTestBrowser(browseTestDB(t), "p", BrowserOptions{})
+	m = update(t, m, keyRunes("0"))
+	if m.current() != nil {
+		t.Fatal("expected no session to be selected in an empty profile")
+	}
+	m = update(t, m, keyRunes("*"))
+	if m.notice != "" {
+		t.Errorf("* with no selection set a notice: %q", m.notice)
+	}
+}
+
+// With one starred session the Groups panel offers a Starred row with the
+// right count directly after All; with nothing starred and nothing selected
+// there is no such row at all. The Starred row is a cross-cutting view, not
+// a configured group, so it sits immediately under All in both the
+// zero-config and configured-groups layouts.
+func TestGroupsPanelStarredRow(t *testing.T) {
+	star := func(t *testing.T, m *browseModel, lineageID string) {
+		t.Helper()
+		if err := annotate.SetStarred(m.db, lineageID, true, time.Unix(1700000000, 0)); err != nil {
+			t.Fatal(err)
+		}
+		// The Groups panel's rows come from m.groupItems, loaded by loadAll
+		// rather than recomputed by rebuild, so a star written straight to
+		// the database only reaches the panel through a reload.
+		m.loadAll()
+	}
+
+	t.Run("one starred, zero config", func(t *testing.T) {
+		m := fixtureBrowser(t)
+		star(t, m, "L0")
+		m = update(t, m, keyRunes("1"))
+
+		rows := m.groups_.rows
+		if len(rows) < 2 {
+			t.Fatalf("Groups panel rows = %+v, want at least All and Starred", rows)
+		}
+		if rows[0].Value != "" || rows[0].Label != "All" {
+			t.Errorf("first row = %+v, want All", rows[0])
+		}
+		if rows[1].Value != "starred" || rows[1].Label != "Starred" || rows[1].Count != 1 {
+			t.Errorf("row after All = %+v, want Starred with count 1", rows[1])
+		}
+	})
+
+	t.Run("one starred, configured groups", func(t *testing.T) {
+		m := groupFixtureBrowser(t)
+		star(t, m, "G0")
+		m = update(t, m, keyRunes("1"))
+
+		if len(m.groups_.rows) < 2 || m.groups_.rows[1].Value != "starred" {
+			t.Fatalf("Groups panel rows = %+v, want Starred directly after All", m.groups_.rows)
+		}
+		if got := m.groups_.rows[1].Count; got != 1 {
+			t.Errorf("Starred row count = %d, want 1", got)
+		}
+	})
+
+	t.Run("nothing starred, nothing selected", func(t *testing.T) {
+		m := fixtureBrowser(t)
+		m = update(t, m, keyRunes("1"))
+		for _, r := range m.groups_.rows {
+			if r.Value == "starred" {
+				t.Fatalf("a Starred row is shown with nothing starred: %+v", m.groups_.rows)
+			}
+		}
+	})
+
+	t.Run("starred view selected at zero count", func(t *testing.T) {
+		m := fixtureBrowser(t)
+		m.setGroupFilter("starred")
+		m = update(t, m, keyRunes("1"))
+
+		var row *facetRow
+		for i := range m.groups_.rows {
+			if m.groups_.rows[i].Value == "starred" {
+				row = &m.groups_.rows[i]
+			}
+		}
+		if row == nil {
+			t.Fatalf("the selected Starred view is not offered at zero count: %+v", m.groups_.rows)
+		}
+		if row.Count != 0 {
+			t.Errorf("Starred row count = %d with nothing starred, want 0", row.Count)
+		}
+	})
+}
+
+// A starred-and-archived session must not advertise a Starred row that
+// would then list nothing: the "starred" view excludes archived sessions
+// (search.Filter's Group doc comment), so the row's count is taken over the
+// same non-archived corpus All is.
+func TestGroupsPanelStarredRowExcludesArchived(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "A0", "claude:p:a0", "p", 1, map[string]any{"cwd": "/x", "last_activity_at": 100})
+	seedLineageOverride(t, db, "A0", "", true) // archived
+	m := newTestBrowser(db, "p", BrowserOptions{Installs: testInstalls("claude")})
+	if err := annotate.SetStarred(m.db, "A0", true, time.Unix(1700000000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	m = update(t, m, keyRunes("1"))
+
+	for _, r := range m.groups_.rows {
+		if r.Value == "starred" {
+			t.Fatalf("a Starred row is offered for an archived-only star: %+v", m.groups_.rows)
+		}
+	}
+}
+
 // The frame must still fit the terminal at every size while a hidden count
 // is in the Sessions border (showAll off) and while an archived row with
 // its [archived] marker is on screen (showAll on) - the two surfaces this

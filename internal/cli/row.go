@@ -195,6 +195,12 @@ func sourceSlotText(it search.Item, labels map[string]string) string {
 	return account + "·" + label
 }
 
+// starGlyph marks a session the user starred, drawn attached to the handle
+// slot (`#42★`) rather than as a field of its own - see rowSlots. A glyph
+// rather than a colour, for the same reason commentMarkerGlyph is: the
+// state has to survive NO_COLOR.
+const starGlyph = "★"
+
 // commentMarkerGlyph marks a session that carries comments, shown in the
 // session row as this glyph followed by the count (e.g. "✎2") - a compact
 // hint that there is more to read on the Detail tab, in the spirit of
@@ -219,6 +225,15 @@ func rowSlots(it search.Item, labels map[string]string) []string {
 		slots[slotHandle] = fmt.Sprintf("#%d", it.Handle)
 	} else {
 		slots[slotHandle] = "#?"
+	}
+	// The star rides on the handle slot rather than a slot of its own: the
+	// handle is the one field fitRowToWidth never drops, so a marker put
+	// here is the one that cannot be shortened away exactly when the user
+	// most needs to see which rows they starred. It is a glyph, not a
+	// colour, so it survives NO_COLOR like the comment marker's own
+	// "state must not exist only as a colour" rule.
+	if it.Starred {
+		slots[slotHandle] += starGlyph
 	}
 	slots[slotSource] = "[" + sourceSlotText(it, labels) + "]"
 

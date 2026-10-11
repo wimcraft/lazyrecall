@@ -240,6 +240,75 @@ func TestRenderRowDoubleWidthCharactersRespectInvariant(t *testing.T) {
 	}
 }
 
+// TestRenderRowShowsStarMarkerOnTheHandle covers the row half of starring:
+// a starred session's handle reads "#<handle>★" and an unstarred one stays
+// "#<handle>". The star rides on the handle rather than a slot of its own
+// because the handle is the one slot fitRowToWidth never drops, so the
+// marker cannot be shortened away.
+func TestRenderRowShowsStarMarkerOnTheHandle(t *testing.T) {
+	base := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 5,
+		CWD: strp("/Users/example/project"), EndState: "completed", Topic: strp("something")}
+
+	line := RenderRow(base, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, "#5") {
+		t.Fatalf("expected the handle in the row, got %q", line)
+	}
+	if strings.Contains(line, starGlyph) {
+		t.Errorf("an unstarred session must carry no star: %q", line)
+	}
+
+	starred := base
+	starred.Starred = true
+	line = RenderRow(starred, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, "#5"+starGlyph) {
+		t.Errorf("expected the starred handle %q in the row, got: %q", "#5"+starGlyph, line)
+	}
+}
+
+// TestRenderRowStarredHandleSurvivesNarrowWidth covers the star's place in
+// the width cascade: at the same widths the existing extreme-narrow test
+// uses, a starred row is still never empty, and at the narrowest width that
+// can hold the handle plus its star the whole "#5★" survives rather than
+// being shortened down to the bare digits or an ellipsis - a marker that
+// vanishes exactly when the row is tightest would be worthless.
+func TestRenderRowStarredHandleSurvivesNarrowWidth(t *testing.T) {
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 5, EndState: "dangling",
+		CWD: strp("/Users/example/a/b/c/project"), Topic: strp("something"), Starred: true}
+	for _, width := range []int{1, 2, 3, 4} {
+		if line := RenderRow(it, RenderOptions{Width: width, Style: false}); line == "" {
+			t.Errorf("width %d: expected a non-empty row for a starred session", width)
+		}
+	}
+	// "#5★" is three columns wide, so three columns is the narrowest width
+	// that can hold both the handle and its star.
+	for _, width := range []int{3, 4, 5, 8} {
+		line := RenderRow(it, RenderOptions{Width: width, Style: false})
+		if !strings.Contains(line, "#5"+starGlyph) {
+			t.Errorf("width %d: expected the starred handle %q to survive, got %q", width, "#5"+starGlyph, line)
+		}
+		if got := runewidth.StringWidth(line); got > width {
+			t.Errorf("width %d: starred row is %d display columns wide: %q", width, got, line)
+		}
+	}
+}
+
+// TestRenderRowStarredFitsWidth is TestRenderRowFitsWidth repeated for a
+// starred row: the star is one more display column in the handle slot, and
+// it must not push the row past its budget at any of those widths.
+func TestRenderRowStarredFitsWidth(t *testing.T) {
+	it := longItem()
+	it.Starred = true
+	for _, width := range []int{120, 80, 60, 40, 30} {
+		line := RenderRow(it, RenderOptions{Width: width, Style: false})
+		if got := runewidth.StringWidth(line); got > width {
+			t.Errorf("width %d: starred row is %d display columns wide: %q", width, got, line)
+		}
+		if strings.Contains(line, "\n") {
+			t.Errorf("width %d: starred row must never contain a newline: %q", width, line)
+		}
+	}
+}
+
 func TestRenderRowHandleInlineNoSeparateIdentifierLine(t *testing.T) {
 	it := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 7, EndState: "completed"}
 	line := RenderRow(it, DefaultRenderOptions)
