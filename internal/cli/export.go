@@ -214,6 +214,7 @@ func WriteJSON(w io.Writer, it search.Item, turns []transcript.Turn, clean, reda
 		j.Name = redactPtr(j.Name)
 		j.CustomName = redactPtr(j.CustomName)
 		j.Topic = redactPtr(j.Topic)
+		j.LastPrompt = redactPtr(j.LastPrompt)
 	}
 
 	enc := json.NewEncoder(w)
