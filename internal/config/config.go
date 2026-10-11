@@ -514,8 +514,9 @@ func Load() (Config, error) {
 
 // validateDefaultGroup checks browse.default_group against exactly the
 // values a session's effective group can be viewed by: "" or its explicit
-// spelling "all" (no group filter), "archive", "unknown", or the name of a
-// group declared in groups. It is the config-file sibling of
+// spelling "all" (no group filter), "archive", "unknown", "starred" (the
+// reserved view of the sessions the user starred), or the name of a group
+// declared in groups. It is the config-file sibling of
 // search.ValidateGroup, which checks the same set of names for --group -
 // duplicated rather than shared, because internal/config cannot import
 // internal/search (search already imports config) and the check is a
@@ -523,7 +524,7 @@ func Load() (Config, error) {
 // direction over.
 func validateDefaultGroup(name string, groups []Group) error {
 	switch name {
-	case "", "all", "archive", "unknown":
+	case "", "all", "archive", "unknown", "starred":
 		return nil
 	}
 	for _, g := range groups {
@@ -531,8 +532,8 @@ func validateDefaultGroup(name string, groups []Group) error {
 			return nil
 		}
 	}
-	valid := make([]string, 0, len(groups)+3)
-	valid = append(valid, "all", "archive", "unknown")
+	valid := make([]string, 0, len(groups)+4)
+	valid = append(valid, "all", "archive", "unknown", "starred")
 	for _, g := range groups {
 		valid = append(valid, g.Name)
 	}
@@ -656,19 +657,22 @@ func globPaths(paths []string) []string {
 }
 
 // reservedGroupNames are the filter values Filter.Group already gives a
-// fixed meaning (internal/search): "all" is the zero value, and "archive"
-// and "unknown" are the two synthetic views alongside a session's real
-// group. A configured [groups.<name>] table using one of these would be
-// unreachable - --group=archive could never mean the config's group named
-// "archive", only the reserved view - so it is rejected at load rather than
-// silently shadowed. Compared case-insensitively: --group=Archive typed by
-// a user would still hit the reserved view, so a group spelled differently
-// only in case is just as unreachable. validateGroupName is only ever
-// consulted for "archive"/"unknown" the way it is for any other reserved or
-// empty name - Load intercepts both before this check, since their
-// color-only tables (change archive-unknown-colors) are a narrower
-// exception, not a lifting of the reservation.
-var reservedGroupNames = map[string]bool{"all": true, "archive": true, "unknown": true}
+// fixed meaning (internal/search): "all" is the zero value, "archive" and
+// "unknown" are the two synthetic views alongside a session's real group,
+// and "starred" is the view of the sessions the user starred
+// (annotate.SetStarred). A configured [groups.<name>] table using one of
+// these would be unreachable - --group=archive could never mean the
+// config's group named "archive", only the reserved view - so it is
+// rejected at load rather than silently shadowed. Compared
+// case-insensitively: --group=Archive typed by a user would still hit the
+// reserved view, so a group spelled differently only in case is just as
+// unreachable. validateGroupName is only ever consulted for
+// "archive"/"unknown" the way it is for any other reserved or empty name -
+// Load intercepts both before this check, since their color-only tables
+// (change archive-unknown-colors) are a narrower exception, not a lifting
+// of the reservation - while "starred" has no such exception and reaches
+// this check the way "all" does.
+var reservedGroupNames = map[string]bool{"all": true, "archive": true, "unknown": true, "starred": true}
 
 // validateGroupName rejects a configured group name that could never be
 // selected: empty, or one of the reserved filter values above.

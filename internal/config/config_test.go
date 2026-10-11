@@ -535,6 +535,7 @@ func TestDefaultGroupAcceptsEveryValidValue(t *testing.T) {
 		{"all", ""},
 		{"archive", "archive"},
 		{"unknown", "unknown"},
+		{"starred", "starred"},
 		{"work", "work"},
 	}
 	for _, c := range cases {
@@ -631,6 +632,47 @@ func TestReservedGroupNameIsConfigError(t *testing.T) {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("group name %q: error %q does not name the offending group", name, err.Error())
 		}
+	}
+}
+
+// TestStarredGroupNameIsConfigError covers change star-sessions: "starred"
+// is now a reserved filter value too (the view of the sessions the user
+// starred), so [groups.starred] would be unreachable exactly like
+// [groups.all] - and, unlike archive/unknown, it gets no color-only
+// exception, because there is no built-in "Starred" row to color: it is a
+// view of the user's own marks, not a session's group.
+func TestStarredGroupNameIsConfigError(t *testing.T) {
+	for _, name := range []string{"starred", "Starred", "STARRED"} {
+		path := writeConfig(t, "[groups."+name+"]\npaths = [\"~/x\"]\n")
+		t.Setenv("LAZYRECALL_CONFIG", path)
+
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("group name %q: expected a config error, got nil", name)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("group name %q: error %q does not name the config file", name, err.Error())
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "starred") {
+			t.Errorf("group name %q: error %q does not name the offending group", name, err.Error())
+		}
+	}
+}
+
+// TestStarredColorOnlyTableIsRejected distinguishes "starred" from
+// archive/unknown: a [groups.starred] table is rejected even when it sets
+// nothing but color, since unlike those two views it has no built-in row
+// whose color a table could stand in for.
+func TestStarredColorOnlyTableIsRejected(t *testing.T) {
+	path := writeConfig(t, "[groups.starred]\ncolor = \"red\"\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected [groups.starred] to be a config error even with only color, got nil")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the config file", err.Error())
 	}
 }
 

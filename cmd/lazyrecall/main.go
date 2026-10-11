@@ -100,6 +100,8 @@ func run(args []string) error {
 		return cmdGroup(global, noRefresh, rest)
 	case "name":
 		return cmdName(global, noRefresh, rest)
+	case "star":
+		return cmdStar(global, noRefresh, rest)
 	case "refresh":
 		return cmdRefresh(global, rest)
 	case "doctor":
@@ -137,6 +139,7 @@ Usage:
   lazyrecall unarchive SESSION_ID
   lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
   lazyrecall name      SESSION_ID TEXT... | SESSION_ID --clear
+  lazyrecall star      SESSION_ID [--clear] | list
   lazyrecall refresh   [--full]
   lazyrecall doctor
   lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
@@ -168,9 +171,12 @@ and resume a session without leaving it.
 
 --group narrows to one view of a session's group (see "lazyrecall groups" for
 the configured names): a configured group's name, "archive" for every
-archived session, or "unknown" for sessions no group rule or manual choice
-has claimed. With no --group, a listing shows every non-archived session
-regardless of group - the same as before groups existed.
+archived session, "starred" for every starred one ("lazyrecall star"), or
+"unknown" for sessions no group rule or manual choice has claimed. --starred
+is shorthand for --group=starred, and the two are refused together, since
+they name two different views. With no --group, a listing shows every
+non-archived session regardless of group - the same as before groups
+existed.
 `)
 }
 
@@ -252,32 +258,57 @@ func splitDoubleDash(args []string) (before, after []string, found bool) {
 }
 
 type filterFlags struct {
-	agent  *string
-	client *string
-	repo   *string
-	tag    *string
-	group  *string
-	since  *int
+	agent   *string
+	client  *string
+	repo    *string
+	tag     *string
+	group   *string
+	since   *int
+	starred *bool
 }
 
 func parseFilterFlags(fs *flag.FlagSet) filterFlags {
 	return filterFlags{
-		agent:  fs.String("agent", "", "filter by agent (claude, pi, omp, hermes, goose, opencode, kilo, antigravity) or install/label"),
-		client: fs.String("client", "", "filter by the program the session was driven through (acp, sdk, cli)"),
-		repo:   fs.String("repo", "", "filter by repository root or working directory"),
-		tag:    fs.String("tag", "", "filter by tag"),
-		group:  fs.String("group", "", "filter by group name, 'archive', or 'unknown' (see 'lazyrecall groups')"),
-		since:  fs.Int("since", 0, "only sessions active in the last N days"),
+		agent:   fs.String("agent", "", "filter by agent (claude, pi, omp, hermes, goose, opencode, kilo, antigravity) or install/label"),
+		client:  fs.String("client", "", "filter by the program the session was driven through (acp, sdk, cli)"),
+		repo:    fs.String("repo", "", "filter by repository root or working directory"),
+		tag:     fs.String("tag", "", "filter by tag"),
+		group:   fs.String("group", "", "filter by group name, 'archive', 'starred', or 'unknown' (see 'lazyrecall groups')"),
+		since:   fs.Int("since", 0, "only sessions active in the last N days"),
+		starred: fs.Bool("starred", false, "only starred sessions"),
 	}
 }
 
+// starredGroup resolves --starred against an explicit --group: --starred is
+// the spelled-out shortcut for the reserved "starred" view (the sessions the
+// user starred, whatever group they otherwise belong to), and asking for
+// both a group and that view at once has no single answer, so it is rejected
+// rather than letting one flag silently win. One helper so the filter flags
+// and the browser - which builds its Filter itself rather than going through
+// buildFilter - cannot drift apart on either the shortcut or the conflict.
+func starredGroup(group string, starred bool) (string, error) {
+	if !starred {
+		return group, nil
+	}
+	if group != "" {
+		return "", fmt.Errorf("--starred and --group cannot be combined")
+	}
+	return "starred", nil
+}
+
 // buildFilter turns the parsed filter flags into a search.Filter, resolving
-// --agent to Filter.Agent and/or Filter.Install (resolveAgentFilter) and
-// validating --group against cfg's configured groups (search.ValidateGroup)
-// - the CLI's one gate for a bad --group value, since every caller below
-// goes through this rather than setting Filter.Group directly.
+// --agent to Filter.Agent and/or Filter.Install (resolveAgentFilter),
+// turning --starred into the reserved "starred" group view (starredGroup),
+// and validating the result against cfg's configured groups
+// (search.ValidateGroup) - the CLI's one gate for a bad --group value, since
+// every caller below goes through this rather than setting Filter.Group
+// directly.
 func buildFilter(cfg config.Config, ff filterFlags) (search.Filter, error) {
-	if err := search.ValidateGroup(cfg, *ff.group); err != nil {
+	group, err := starredGroup(*ff.group, *ff.starred)
+	if err != nil {
+		return search.Filter{}, err
+	}
+	if err := search.ValidateGroup(cfg, group); err != nil {
 		return search.Filter{}, err
 	}
 	agent, install := resolveAgentFilter(cfg, *ff.agent)
@@ -287,7 +318,7 @@ func buildFilter(cfg config.Config, ff filterFlags) (search.Filter, error) {
 		Client:  *ff.client,
 		Repo:    *ff.repo,
 		Tag:     *ff.tag,
-		Group:   *ff.group,
+		Group:   group,
 		Groups:  cfg.Groups,
 	}
 	if *ff.since > 0 {
@@ -453,7 +484,7 @@ func cmdSearch(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []
 }
 
 func cmdReview(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []string) error {
-	groupFlag := global.String("group", "", "filter by group name, 'archive', or 'unknown' (see 'lazyrecall groups')")
+	groupFlag := global.String("group", "", "filter by group name, 'archive', 'starred', or 'unknown' (see 'lazyrecall groups')")
 	if err := global.Parse(args); err != nil {
 		return err
 	}
@@ -941,6 +972,58 @@ func cmdName(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	return nil
 }
 
+// cmdStar implements `lazyrecall star SESSION_ID`, `lazyrecall star
+// SESSION_ID --clear` and `lazyrecall star list` - the CLI surface for
+// annotate.SetStarred, which also backs the browser's `*` action (change
+// star-sessions, task T08). Like archiving, a star is a decision the user
+// made, recorded on the durable lineage, so a full index rebuild cannot
+// destroy it. `list` renders the starred sessions through the normal row
+// path rather than a bespoke format, through the reserved "starred" group
+// view (the same one `--starred` selects): every non-archived starred
+// session, whatever group it otherwise belongs to. SESSION_ID is resolved
+// with resolveItem, exactly like archive/group/name, so the short handle,
+// the full composite id, and an unambiguous prefix of either all work.
+func cmdStar(global *flag.FlagSet, noRefresh *bool, args []string) error {
+	clear := global.Bool("clear", false, "remove the star instead of setting it")
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: lazyrecall star SESSION_ID|list [--clear]")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
+	}
+
+	if rest[0] == "list" {
+		items, err := search.List(db, search.Filter{Group: "starred", Groups: cfg.Groups, Hide: cfg.Hide})
+		if err != nil {
+			return err
+		}
+		return outputItems(items, false, 0, "No starred sessions.", "starred", installLabelsForCLI(cfg), cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
+	}
+
+	item, err := resolveItem(db, cfg, rest[0])
+	if err != nil {
+		return err
+	}
+	if err := annotate.SetStarred(db, item.LineageID, !*clear, time.Now()); err != nil {
+		return err
+	}
+	if *clear {
+		fmt.Printf("%s -> (unstarred)\n", rest[0])
+	} else {
+		fmt.Printf("%s -> starred\n", rest[0])
+	}
+	return nil
+}
+
 // cmdDoctor implements `lazyrecall doctor`: a read-only health report over
 // every discovered install (internal/doctor) - the program each one resumes
 // with and whether it is on PATH, its session and lost-transcript counts, and
@@ -1396,7 +1479,11 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 	if err != nil {
 		return err
 	}
-	if err := search.ValidateGroup(cfg, *ff.group); err != nil {
+	group, err := starredGroup(*ff.group, *ff.starred)
+	if err != nil {
+		return err
+	}
+	if err := search.ValidateGroup(cfg, group); err != nil {
 		return err
 	}
 	// "if not given, use cfg.Browse.DefaultGroup" (change
@@ -1404,7 +1491,8 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 	// same empty-string zero value, so an unset flag falls through to the
 	// configured default exactly as an explicit --group="" would - the only
 	// value that distinction could matter for is already All either way.
-	group := *ff.group
+	// --starred, resolved by starredGroup above, always names the reserved
+	// "starred" view explicitly and so outranks the configured default.
 	if group == "" {
 		group = cfg.Browse.DefaultGroup
 	}
