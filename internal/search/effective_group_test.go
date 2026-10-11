@@ -74,6 +74,57 @@ func TestCountsSplitsByGroupArchiveAndUnknown(t *testing.T) {
 	}
 }
 
+// TestCountsStarsOverlapGroups covers the reserved "starred" view's count:
+// a non-archived starred session adds to Starred whatever its group - so a
+// starred session inside a configured group and a starred Unknown session
+// both count, while a starred archived session does not. Starred overlaps
+// the other counts rather than partitioning the corpus: it never subtracts
+// from ByGroup/Unknown/Archive.
+func TestCountsStarsOverlapGroups(t *testing.T) {
+	db := testDB(t)
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "group_name", "archived_at", "starred_at"}, []map[string]any{
+		{"id": "lin-work", "profile": "p", "orphaned": 0, "group_name": nil, "archived_at": nil, "starred_at": 1000},
+		{"id": "lin-unknown", "profile": "p", "orphaned": 0, "group_name": nil, "archived_at": nil, "starred_at": 1000},
+		{"id": "lin-archived-work", "profile": "p", "orphaned": 0, "group_name": "work", "archived_at": 2000, "starred_at": 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:work", "source": "claude", "source_session_id": "work", "lineage_id": "lin-work",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:unknown", "source": "claude", "source_session_id": "unknown", "lineage_id": "lin-unknown",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200, "cwd": "/tmp",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:archived", "source": "claude", "source_session_id": "archived", "lineage_id": "lin-archived-work",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 300,
+	})
+
+	groups := []config.Group{{Name: "work", Paths: []string{"/home/me/code"}}}
+	counts, err := Counts(db, config.Hide{}, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Starred != 2 {
+		t.Errorf("Starred = %d, want 2 (the group and the unknown session; the archived one does not count)", counts.Starred)
+	}
+	if counts.ByGroup["work"] != 1 {
+		t.Errorf("ByGroup[work] = %d, want 1 (a starred session still counts in its group)", counts.ByGroup["work"])
+	}
+	if counts.Unknown != 1 {
+		t.Errorf("Unknown = %d, want 1 (a starred session with no group still counts as Unknown)", counts.Unknown)
+	}
+	if counts.Archive != 1 {
+		t.Errorf("Archive = %d, want 1 (a starred archived session still counts only as archived)", counts.Archive)
+	}
+}
+
 // TestPathGroupAgreesWithSQLGroupExpr runs the Go-side matcher (PathGroup,
 // which the browser's `p` popup uses to show what clearing a manual
 // override would produce) and the SQL expression every query actually
