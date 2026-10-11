@@ -349,3 +349,21 @@ func TestLoadConversationErrors(t *testing.T) {
 		t.Errorf("missing install error = %v", err)
 	}
 }
+
+// TestWriteJSONRedactsTheSessionsLastPrompt covers the session header:
+// last_prompt is the user's own text, as likely to hold a pasted key as any
+// turn, so it is redacted along with the turns and the title.
+func TestWriteJSONRedactsTheSessionsLastPrompt(t *testing.T) {
+	prompt := "use api_key=abc123def"
+	it := search.Item{SessionID: "claude:p:s0", Source: "claude", LastPrompt: &prompt}
+	var b strings.Builder
+	if err := WriteJSON(&b, it, nil, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "abc123def") {
+		t.Errorf("last_prompt not redacted:\n%s", b.String())
+	}
+	if !strings.Contains(b.String(), "api_key=[REDACTED]") {
+		t.Errorf("expected the redacted value in last_prompt:\n%s", b.String())
+	}
+}
