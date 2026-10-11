@@ -2,6 +2,7 @@ package search
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -181,6 +182,58 @@ func TestMissingDirectoryStillListedAndSearchable(t *testing.T) {
 	}
 	if len(hits) != 1 {
 		t.Fatalf("expected the session to still be searchable, got %+v", hits)
+	}
+}
+
+// TestTranscriptGoneWhenFileMissing covers Claude Code's cleanupPeriodDays
+// case: the index still records a transcript path, but the file was deleted
+// since the last refresh, so resuming the session fails inside Claude with
+// "No conversation found". The session must still be listed, with
+// TranscriptGone telling a caller what happened; a session that records no
+// transcript at all (the SQLite-backed sources) is never flagged.
+func TestTranscriptGoneWhenFileMissing(t *testing.T) {
+	db := testDB(t)
+	dir := t.TempDir()
+	present := filepath.Join(dir, "present.jsonl")
+	if err := os.WriteFile(present, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "cleaned-up.jsonl")
+
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 300,
+		"transcript_path": present,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:2", "source": "claude", "source_session_id": "2", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+		"transcript_path": missing,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "goose:p:3", "source": "goose", "source_session_id": "3", "lineage_id": "lin3",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected all three sessions to stay listed, got %+v", items)
+	}
+	byID := make(map[string]Item, len(items))
+	for _, it := range items {
+		byID[it.SessionID] = it
+	}
+	if byID["claude:p:1"].TranscriptGone {
+		t.Error("a transcript file that still exists must not be flagged as gone")
+	}
+	if !byID["claude:p:2"].TranscriptGone {
+		t.Error("a recorded transcript file that no longer exists must be flagged as gone")
+	}
+	if byID["goose:p:3"].TranscriptGone {
+		t.Error("a session that records no transcript_path must not be flagged as gone")
 	}
 }
 

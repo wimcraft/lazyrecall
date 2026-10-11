@@ -17,23 +17,27 @@ import (
 // jsonItem is the machine-readable shape of one session (task 11.2). Field
 // names are stable and independent of the human-readable rendering.
 type jsonItem struct {
-	SessionID      string   `json:"session_id"`
-	Source         string   `json:"source"`
-	LineageID      string   `json:"lineage_id"`
-	Handle         int      `json:"handle,omitempty"`
-	CWD            *string  `json:"cwd,omitempty"`
-	GitBranch      *string  `json:"git_branch,omitempty"`
-	GitRepoRoot    *string  `json:"git_repo_root,omitempty"`
-	StartedAt      *string  `json:"started_at,omitempty"`
-	LastActivityAt *string  `json:"last_activity_at,omitempty"`
-	Topic          *string  `json:"topic,omitempty"`
-	Name           *string  `json:"name,omitempty"`
-	CustomName     *string  `json:"custom_name,omitempty"`
-	LastPrompt     *string  `json:"last_prompt,omitempty"`
-	EndState       string   `json:"end_state"`
-	Origin         string   `json:"origin,omitempty"`
-	Client         *string  `json:"client,omitempty"`
-	DirExists      *bool    `json:"dir_exists,omitempty"`
+	SessionID      string  `json:"session_id"`
+	Source         string  `json:"source"`
+	LineageID      string  `json:"lineage_id"`
+	Handle         int     `json:"handle,omitempty"`
+	CWD            *string `json:"cwd,omitempty"`
+	GitBranch      *string `json:"git_branch,omitempty"`
+	GitRepoRoot    *string `json:"git_repo_root,omitempty"`
+	StartedAt      *string `json:"started_at,omitempty"`
+	LastActivityAt *string `json:"last_activity_at,omitempty"`
+	Topic          *string `json:"topic,omitempty"`
+	Name           *string `json:"name,omitempty"`
+	CustomName     *string `json:"custom_name,omitempty"`
+	LastPrompt     *string `json:"last_prompt,omitempty"`
+	EndState       string  `json:"end_state"`
+	Origin         string  `json:"origin,omitempty"`
+	Client         *string `json:"client,omitempty"`
+	DirExists      *bool   `json:"dir_exists,omitempty"`
+	// TranscriptGone flags a session whose recorded transcript file has
+	// been deleted since the last refresh, so a script can tell a
+	// session that is still resumable apart from one that is not.
+	TranscriptGone bool     `json:"transcript_gone,omitempty"`
 	MessageCount   *int64   `json:"message_count,omitempty"`
 	Resumable      bool     `json:"resumable"`
 	Archived       bool     `json:"archived,omitempty"`
@@ -49,7 +53,7 @@ func toJSONItem(it search.Item) jsonItem {
 		Topic: it.Topic, Name: it.Name, CustomName: it.CustomName, LastPrompt: it.LastPrompt, EndState: string(it.EndState),
 		Origin:    string(it.Origin),
 		Client:    it.Client,
-		DirExists: it.DirExists, MessageCount: it.MessageCount, Resumable: it.Resumable,
+		DirExists: it.DirExists, TranscriptGone: it.TranscriptGone, MessageCount: it.MessageCount, Resumable: it.Resumable,
 		Archived: it.Archived, Tags: it.Tags, CommentCount: it.CommentCount, MatchSnippet: it.MatchSnippet,
 	}
 	if it.StartedAt != nil {

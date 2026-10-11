@@ -109,6 +109,28 @@ func TestWriteItemsJSONIncludesCustomNameAndCommentCount(t *testing.T) {
 	}
 }
 
+// A session whose recorded transcript file was deleted since the last
+// refresh is still listed, but a script reading --json needs to see that
+// before it tries to resume it - the flag is carried and omitted, like the
+// other per-session flags, when the session's transcript is there.
+func TestWriteItemsJSONIncludesTranscriptGone(t *testing.T) {
+	items := []search.Item{
+		{SessionID: "claude:p:1", EndState: "completed", TranscriptGone: true},
+		{SessionID: "claude:p:2", EndState: "completed"},
+	}
+	var buf bytes.Buffer
+	if err := WriteItemsJSON(&buf, items); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"transcript_gone": true`) {
+		t.Errorf("expected transcript_gone in output, got:\n%s", out)
+	}
+	if strings.Count(out, `"transcript_gone"`) != 1 {
+		t.Errorf("expected transcript_gone omitted for the session whose transcript exists, got:\n%s", out)
+	}
+}
+
 func TestWriteItemsHumanShowsEmptyMessage(t *testing.T) {
 	var buf bytes.Buffer
 	WriteItemsHuman(&buf, nil, "nothing here", DefaultRenderOptions)
