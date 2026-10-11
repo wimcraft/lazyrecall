@@ -1736,3 +1736,175 @@ func TestResumeAmbiguousPrefixPrintsCandidatesAndExitsNonZero(t *testing.T) {
 		t.Errorf("expected both candidate sessions listed on stderr, got:\n%s", got)
 	}
 }
+
+// The following cover task "new command": `lazyrecall new --agent=NAME`,
+// which starts a new session through resume.Launch. resume.Launch reaches
+// execAgent only after it has a program on PATH, so every case below is
+// built to stop before that: a usage error, an agent that cannot be pinned
+// to one install, or a --model a source has no template for (Launch's own
+// missing-template check runs before any LookPath or exec). No stub is
+// needed and no real agent is ever started.
+
+// setupLaunchTestEnv isolates HOME/config/data and makes exactly one hermes
+// install discoverable - the source these --model failures need, since
+// hermes has a New template but no Model template in the built-in defaults
+// (internal/config defaultSources; pi and claude do have one, so neither can
+// stand in). Returns the install's name and an open runner over its (empty)
+// index.
+func setupLaunchTestEnv(t *testing.T) (install string, db *sqlitex.Runner) {
+	t.Helper()
+	home := t.TempDir()
+	hermesRoot := filepath.Join(home, ".hermes")
+	if err := os.MkdirAll(hermesRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(home, "no-such-config.toml"))
+	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", filepath.Join(home, "nope-claude"))
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(home, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", hermesRoot)
+
+	installs, err := profile.Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installs) != 1 || installs[0].Name != "hermes" {
+		t.Fatalf("expected exactly the hermes install, got %+v", installs)
+	}
+	if err := os.MkdirAll(profile.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db = &sqlitex.Runner{DBPath: profile.DBPath()}
+	if _, err := schema.Open(db); err != nil {
+		t.Fatal(err)
+	}
+	return installs[0].Name, db
+}
+
+// TestNewCommandRequiresAgent covers that --agent, with no default, is
+// required: the usage error is reported rather than a launch against an
+// unnamed source.
+func TestNewCommandRequiresAgent(t *testing.T) {
+	setupGroupTestEnv(t, "")
+
+	_, runErr := runCaptured(t, []string{"new"})
+	if runErr == nil {
+		t.Fatal("expected a usage error when --agent is omitted")
+	}
+	if !strings.Contains(runErr.Error(), "usage: lazyrecall new --agent=NAME") {
+		t.Errorf("error %q should be the new command's usage line", runErr.Error())
+	}
+}
+
+// TestNewCommandSeveralInstallsErrors covers that a source name matching
+// more than one discovered install is refused rather than guessed: the
+// error lists both installs by name and points at --agent=<install or
+// label>. Two claude roots produce the two installs ("claude" and
+// "claude-personal"), and --agent=claude names the source, not either one.
+func TestNewCommandSeveralInstallsErrors(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, ".claude")
+	personal := filepath.Join(dir, ".claude-personal")
+	for _, root := range []string{work, personal} {
+		if err := os.MkdirAll(filepath.Join(root, "projects"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(dir, "no-such-config.toml"))
+	t.Setenv("LAZYRECALL_HOME", filepath.Join(dir, "data"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", work+":"+personal)
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
+
+	_, runErr := runCaptured(t, []string{"new", "--agent=claude"})
+	if runErr == nil {
+		t.Fatal("expected an error when a source names several installs")
+	}
+	msg := runErr.Error()
+	for _, want := range []string{"claude has several installs", "claude", "claude-personal", "--agent=<install or label>"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q should contain %q", msg, want)
+		}
+	}
+}
+
+// TestNewCommandMissingModelTemplateErrors covers that a --model a source
+// has no template for is a hard failure (resume.Launch's own check, before
+// it ever resolves a program), naming the config key to add - not a launch
+// that silently drops the model.
+func TestNewCommandMissingModelTemplateErrors(t *testing.T) {
+	setupLaunchTestEnv(t)
+
+	_, runErr := runCaptured(t, []string{"new", "--agent=hermes", "--model=opus"})
+	if runErr == nil {
+		t.Fatal("expected an error for --model on a source with no model template")
+	}
+	want := "hermes has no model setting configured (model = [...] under [sources.hermes])."
+	if !strings.Contains(runErr.Error(), want) {
+		t.Errorf("error %q should contain the T12 message %q", runErr.Error(), want)
+	}
+}
+
+// TestResumeModelMissingTemplateErrors covers `resume ID --model=M` for a
+// source with no model template: the same T12 message, raised by
+// resume.Resume before it touches the disk and printed as the outcome (like
+// every other resume failure - cmdResume prints the outcome and returns
+// nil). The seeded session's cwd is present so Resume reaches the model
+// check (which sits after the directory/transcript/profile checks and
+// before program lookup) rather than stopping at DirectoryMissing first.
+func TestResumeModelMissingTemplateErrors(t *testing.T) {
+	install, db := setupLaunchTestEnv(t)
+	cwd := t.TempDir()
+	b := db.NewBatch()
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "origin", "cwd", "dir_exists"}, []map[string]any{
+		{"id": "hermes:" + install + ":model1", "source": "hermes", "source_session_id": "model1", "lineage_id": "lin-model", "end_state": "completed", "resumable": 1, "origin": "interactive", "cwd": cwd, "dir_exists": 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runCaptured(t, []string{"resume", "--no-refresh", "model1", "--model=opus"})
+	if runErr != nil {
+		t.Fatalf("run(resume --model): %v", runErr)
+	}
+	want := "hermes has no model setting configured (model = [...] under [sources.hermes])."
+	if !strings.Contains(out, want) {
+		t.Errorf("output %q should contain the T12 message %q", out, want)
+	}
+}
+
+// TestNewSessionIDShape covers the UUID v4 generator newSessionID: 36
+// characters of canonical hyphenated form, version nibble 4, variant nibble
+// in 89ab, and two draws that differ (a generator returning a constant, or
+// seeded identically each call, would resume the same phantom session every
+// time).
+func TestNewSessionIDShape(t *testing.T) {
+	first, err := newSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 36 {
+		t.Errorf("id %q has %d characters, want 36", first, len(first))
+	}
+	if first[14] != '4' {
+		t.Errorf("id %q version nibble = %q, want '4'", first, first[14])
+	}
+	if !strings.ContainsRune("89ab", rune(first[19])) {
+		t.Errorf("id %q variant nibble = %q, want one of 89ab", first, first[19])
+	}
+	if first == second {
+		t.Errorf("two calls returned the same id %q", first)
+	}
+}
