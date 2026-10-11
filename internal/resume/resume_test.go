@@ -482,3 +482,265 @@ func TestResumeTemplateMetacharactersStayLiteralArgv(t *testing.T) {
 		t.Errorf("argv = %q, want the metacharacters passed through as literal elements %q", gotArgv, want)
 	}
 }
+
+// launchStub records the argv a Launch hands to execAgent instead of
+// replacing the test process, and restores execAgent on cleanup. It returns
+// a pointer to the recorded argv so a test can assert on it after Launch
+// returns (Launch reaches the unreachable-return safety net when the stub
+// returns nil, so it never truly replaces this process).
+func launchStub(t *testing.T) *[]string {
+	t.Helper()
+	var gotArgv []string
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		gotArgv = argv
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+	return &gotArgv
+}
+
+// TestLaunchClaudeShapeExecsFullCommand covers the core launch contract: the
+// New/NewID/NewName/Model/Prompt templates compose, in that order, into
+// exactly `claude --session-id ID --name NAME --model M PROMPT`, with the
+// agent started in the requested directory. execAgent is stubbed, so the
+// test never replaces itself.
+func TestLaunchClaudeShapeExecsFullCommand(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origWD) })
+
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotArgv []string
+	var gotWD string
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		gotArgv = argv
+		gotWD, _ = os.Getwd()
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+
+	Launch(LaunchTarget{
+		Source: "claude", CWD: dir,
+		ID: "abc-123", Name: "my session", Model: "opus", Prompt: "hello",
+		Templates: config.Source{
+			New:     []string{"claude"},
+			NewID:   []string{"--session-id", "{id}"},
+			NewName: []string{"--name", "{name}"},
+			Model:   []string{"--model", "{model}"},
+			Prompt:  []string{"{prompt}"},
+		},
+	})
+
+	want := []string{"claude", "--session-id", "abc-123", "--name", "my session", "--model", "opus", "hello"}
+	if !reflect.DeepEqual(gotArgv, want) {
+		t.Fatalf("argv = %q, want %q", gotArgv, want)
+	}
+	resolvedWD, err := filepath.EvalSymlinks(gotWD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedWD != dir {
+		t.Errorf("launched in %q, want %q", resolvedWD, dir)
+	}
+}
+
+// TestLaunchPromptMetacharactersStayLiteralArgv covers the injection surface
+// on the launch side: a first prompt that looks like a shell command is
+// handed to execAgent as one literal argv element, never parsed by a shell,
+// because launchCommand substitutes per element and no shell is ever
+// involved.
+func TestLaunchPromptMetacharactersStayLiteralArgv(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+	gotArgv := launchStub(t)
+
+	Launch(LaunchTarget{
+		Source: "claude", CWD: dir,
+		Prompt: "; rm -rf ~",
+		Templates: config.Source{
+			New:    []string{"claude"},
+			Prompt: []string{"{prompt}"},
+		},
+	})
+
+	want := []string{"claude", "; rm -rf ~"}
+	if !reflect.DeepEqual(*gotArgv, want) {
+		t.Errorf("argv = %q, want the prompt as one literal element %q", *gotArgv, want)
+	}
+}
+
+// TestLaunchModelWithoutTemplateFailsBeforeExec covers the hard-failure
+// rule: asking for a model a source has no template for must fail without
+// starting the agent, not launch it silently on the default model. execAgent
+// is stubbed to record whether it was reached at all - it must not be.
+func TestLaunchModelWithoutTemplateFailsBeforeExec(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+
+	called := false
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+
+	out := Launch(LaunchTarget{
+		Source: "claude", CWD: dir, Model: "opus",
+		Templates: config.Source{New: []string{"claude"}},
+	})
+	if !out.Failed {
+		t.Fatalf("expected Failed, got %+v", out)
+	}
+	if called {
+		t.Error("execAgent must never be called when the model template is empty")
+	}
+	want := "claude has no model setting configured (model = [...] under [sources.claude])."
+	if out.Message != want {
+		t.Errorf("message = %q, want %q", out.Message, want)
+	}
+}
+
+// TestLaunchNoNewCommandFails covers the "cannot start a session at all"
+// outcome: a source whose New template is empty must be reported, and
+// execAgent must never be reached.
+func TestLaunchNoNewCommandFails(t *testing.T) {
+	dir := t.TempDir()
+	gotArgv := launchStub(t)
+
+	out := Launch(LaunchTarget{Source: "unknown", CWD: dir})
+	if !out.Failed {
+		t.Fatalf("expected Failed, got %+v", out)
+	}
+	if *gotArgv != nil {
+		t.Errorf("execAgent must never be called without a new-session command, got argv %q", *gotArgv)
+	}
+	want := "unknown has no new-session command configured (new = [...] under [sources.unknown])."
+	if out.Message != want {
+		t.Errorf("message = %q, want %q", out.Message, want)
+	}
+}
+
+// TestLaunchMissingDirectoryNeedsMkdir covers the directory rule: a missing
+// cwd fails with a message naming --mkdir when Mkdir is false, and is
+// created (in t.TempDir(), never a real home) when it is true - and the
+// launch then proceeds in the created directory.
+func TestLaunchMissingDirectoryNeedsMkdir(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+
+	tpl := config.Source{New: []string{"claude"}}
+
+	missing := filepath.Join(t.TempDir(), "not-there")
+	gotArgv := launchStub(t)
+	out := Launch(LaunchTarget{Source: "claude", CWD: missing, Templates: tpl})
+	if !out.Failed {
+		t.Fatalf("expected Failed for a missing directory without --mkdir, got %+v", out)
+	}
+	if *gotArgv != nil {
+		t.Error("execAgent must never be called when the directory is missing and Mkdir is false")
+	}
+	want := `"` + missing + `" does not exist; pass --mkdir to create it.`
+	if out.Message != want {
+		t.Errorf("message = %q, want %q", out.Message, want)
+	}
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origWD) })
+
+	created := filepath.Join(t.TempDir(), "new-session")
+	gotArgv2 := launchStub(t)
+	Launch(LaunchTarget{Source: "claude", CWD: created, Mkdir: true, Templates: tpl})
+	fi, err := os.Stat(created)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("expected %q to exist as a directory after Mkdir, stat err %v", created, err)
+	}
+	if !reflect.DeepEqual(*gotArgv2, []string{"claude"}) {
+		t.Errorf("argv = %q, want [claude]", *gotArgv2)
+	}
+}
+
+// TestLaunchFileCWDIsNotADirectory covers the exists-but-is-a-file case: the
+// launch must refuse rather than chdir into (or exec the agent with) a path
+// that is not a directory, even with Mkdir set.
+func TestLaunchFileCWDIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotArgv := launchStub(t)
+
+	out := Launch(LaunchTarget{Source: "claude", CWD: file, Mkdir: true, Templates: config.Source{New: []string{"claude"}}})
+	if !out.Failed {
+		t.Fatalf("expected Failed for a file cwd, got %+v", out)
+	}
+	if *gotArgv != nil {
+		t.Error("execAgent must never be called for a cwd that is a file")
+	}
+	if !strings.Contains(out.Message, "is not a directory") {
+		t.Errorf("message = %q, want it to name the file-not-a-directory problem", out.Message)
+	}
+}
+
+// TestResumeAppendsModelTemplate covers resume --model: when a model is
+// given, its template is appended to the resume argv (after the id, before
+// any later flag) so `claude --resume ID --model M` is what the agent sees.
+func TestResumeAppendsModelTemplate(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+
+	var gotArgv []string
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		gotArgv = argv
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+
+	Resume(Target{
+		Source: "claude", SourceSessionID: "abc-123", Resumable: true, CWD: strp(dir),
+		Resume:        []string{"claude", "--resume", "{id}"},
+		Model:         "opus",
+		ModelTemplate: []string{"--model", "{model}"},
+	})
+
+	want := []string{"claude", "--resume", "abc-123", "--model", "opus"}
+	if !reflect.DeepEqual(gotArgv, want) {
+		t.Errorf("argv = %q, want %q", gotArgv, want)
+	}
+}
+
+// TestResumeModelWithoutTemplateFailsBeforeExec covers the resume-side hard
+// failure: a model with no template must fail before program lookup, not
+// resume on the default model. PATH is empty of a real claude, so a lookup
+// would fail with a different message - proving none happened.
+func TestResumeModelWithoutTemplateFailsBeforeExec(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+
+	out := Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume: []string{"claude", "--resume", "{id}"},
+		Model:  "opus",
+	})
+	if !out.Failed {
+		t.Fatalf("expected Failed, got %+v", out)
+	}
+	want := "claude has no model setting configured (model = [...] under [sources.claude])."
+	if out.Message != want {
+		t.Errorf("message = %q, want %q", out.Message, want)
+	}
+}

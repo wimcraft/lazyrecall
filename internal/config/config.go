@@ -43,6 +43,37 @@ type Source struct {
 	Resume []string `toml:"resume"`  // argv template; "{id}" is replaced with the session id
 	EnvVar string   `toml:"env_var"` // env var to set to the profile's root when resuming
 
+	// New is the argv template that starts a new session in this source.
+	// Empty or absent means lazyrecall cannot start a session in this
+	// source at all - it is the one piece with no inferred default, since
+	// every source spells it differently (claude/pi/omp from their own
+	// name, goose with its "session" subcommand, ...).
+	New []string `toml:"new"`
+
+	// NewID is appended to New when lazyrecall chooses the new session's
+	// id, with "{id}" replaced by that id (claude/pi's --session-id).
+	// Nothing may be appended if the source has no such flag, because a
+	// caller that later wants to resume the session needs an id it
+	// already knows rather than one the agent picked.
+	NewID []string `toml:"new_id"`
+
+	// NewName is appended to New when a name is given, with "{name}"
+	// replaced (claude/pi's --name). Optional: not every source has a name
+	// flag, and a session works without one.
+	NewName []string `toml:"new_name"`
+
+	// Model is appended when a model is given - to New for a new session,
+	// to Resume for a resume - with "{model}" replaced. Empty means the
+	// source has no model flag, and asking for one is an error rather than
+	// a silently dropped option.
+	Model []string `toml:"model"`
+
+	// Prompt is appended last, when a first prompt is given, with
+	// "{prompt}" replaced. Last because it is a positional argument in
+	// every source that has one (claude, pi, omp), and anything appended
+	// after it would be read as part of the prompt.
+	Prompt []string `toml:"prompt"`
+
 	// SingleInstall marks a source that has exactly one installation per
 	// machine and so cannot be split work/personal. Such a source is
 	// bundled into one primary profile instead of naming a profile of its
@@ -211,20 +242,42 @@ func defaultSources() map[string]Source {
 			Roots:  []string{"~/.claude-personal", "~/.claude"},
 			Resume: []string{"claude", "--resume", "{id}"},
 			EnvVar: "CLAUDE_CONFIG_DIR",
+			// --session-id, -n/--name and --model, checked against
+			// `claude --help` before writing this; a prompt is the
+			// positional [prompt].
+			New:     []string{"claude"},
+			NewID:   []string{"--session-id", "{id}"},
+			NewName: []string{"--name", "{name}"},
+			Model:   []string{"--model", "{model}"},
+			Prompt:  []string{"{prompt}"},
 		},
 		"pi": {
-			Roots:         []string{"~/.pi"},
-			Resume:        []string{"pi", "--session", "{id}"},
+			Roots:  []string{"~/.pi"},
+			Resume: []string{"pi", "--session", "{id}"},
+			// --session-id, --name and --model, checked against
+			// `pi --help` before writing this; messages are positional.
+			New:           []string{"pi"},
+			NewID:         []string{"--session-id", "{id}"},
+			NewName:       []string{"--name", "{name}"},
+			Model:         []string{"--model", "{model}"},
+			Prompt:        []string{"{prompt}"},
 			SingleInstall: true,
 		},
 		"omp": {
-			Roots:         []string{"~/.omp"},
-			Resume:        []string{"omp", "--resume", "{id}"},
+			Roots:  []string{"~/.omp"},
+			Resume: []string{"omp", "--resume", "{id}"},
+			// --model= and a positional prompt, checked against
+			// `omp --help`; it has no name or session-id flag, so
+			// neither is configured.
+			New:           []string{"omp"},
+			Model:         []string{"--model={model}"},
+			Prompt:        []string{"{prompt}"},
 			SingleInstall: true,
 		},
 		"hermes": {
 			Roots:         []string{"~/.hermes"},
 			Resume:        []string{"hermes", "--resume", "{id}"},
+			New:           []string{"hermes"},
 			SingleInstall: true,
 		},
 		"goose": {
@@ -233,7 +286,10 @@ func defaultSources() map[string]Source {
 			// session --help` before writing this) - the two must be
 			// given together, not --resume alone (which would resume
 			// the most recent session instead of the one requested).
-			Resume:        []string{"goose", "session", "--resume", "--session-id", "{id}"},
+			Resume: []string{"goose", "session", "--resume", "--session-id", "{id}"},
+			// A new session is the "session" subcommand with no flags;
+			// its model/prompt flags were not verified, so none is set.
+			New:           []string{"goose", "session"},
 			SingleInstall: true,
 		},
 		"opencode": {
@@ -241,15 +297,21 @@ func defaultSources() map[string]Source {
 			// -s/--session at the top level, with no subcommand, is
 			// opencode's own default command ("start opencode tui") -
 			// confirmed from `opencode --help` before writing this.
-			Resume:        []string{"opencode", "--session", "{id}"},
+			Resume: []string{"opencode", "--session", "{id}"},
+			// The bare command starts a new session; model/prompt flags
+			// were not verified, so none is set.
+			New:           []string{"opencode"},
 			SingleInstall: true,
 		},
 		"kilo": {
 			// Kilo is OpenCode's schema and CLI under another name, so the
 			// resume flag is the same one - "-s, --session  session id to
 			// continue", confirmed from `kilo --help` before writing this.
-			Roots:         []string{"~/.local/share/kilo"},
-			Resume:        []string{"kilo", "--session", "{id}"},
+			Roots:  []string{"~/.local/share/kilo"},
+			Resume: []string{"kilo", "--session", "{id}"},
+			// The bare command starts a new session; model/prompt flags
+			// were not verified, so none is set.
+			New:           []string{"kilo"},
 			SingleInstall: true,
 		},
 		"antigravity": {
@@ -257,7 +319,10 @@ func defaultSources() map[string]Source {
 			// --conversation "Resume a previous conversation by ID" -
 			// confirmed unambiguous from `agy --help` before writing
 			// this, unlike goose/opencode's flag combinations above.
-			Resume:        []string{"agy", "--conversation", "{id}"},
+			Resume: []string{"agy", "--conversation", "{id}"},
+			// The bare command starts a new conversation; model/prompt
+			// flags were not verified, so none is set.
+			New:           []string{"agy"},
 			SingleInstall: true,
 		},
 	}
@@ -301,6 +366,11 @@ func defaultOrigins(sources map[string]Source) map[string]Origin {
 		m["sources."+name+".roots"] = OriginDefault
 		m["sources."+name+".resume"] = OriginDefault
 		m["sources."+name+".env_var"] = OriginDefault
+		m["sources."+name+".new"] = OriginDefault
+		m["sources."+name+".new_id"] = OriginDefault
+		m["sources."+name+".new_name"] = OriginDefault
+		m["sources."+name+".model"] = OriginDefault
+		m["sources."+name+".prompt"] = OriginDefault
 		m["sources."+name+".single_install"] = OriginDefault
 	}
 	// Groups has no defaults: with nothing configured, there is nothing to
@@ -393,6 +463,11 @@ func Load() (Config, error) {
 			Roots:         expandPaths(s.Roots),
 			Resume:        s.Resume,
 			EnvVar:        s.EnvVar,
+			New:           s.New,
+			NewID:         s.NewID,
+			NewName:       s.NewName,
+			Model:         s.Model,
+			Prompt:        s.Prompt,
 			SingleInstall: s.SingleInstall,
 		}
 		// Once a source's table appears, the whole source is file-owned -
@@ -401,6 +476,11 @@ func Load() (Config, error) {
 		cfg.Origins["sources."+name+".roots"] = OriginFile
 		cfg.Origins["sources."+name+".resume"] = OriginFile
 		cfg.Origins["sources."+name+".env_var"] = OriginFile
+		cfg.Origins["sources."+name+".new"] = OriginFile
+		cfg.Origins["sources."+name+".new_id"] = OriginFile
+		cfg.Origins["sources."+name+".new_name"] = OriginFile
+		cfg.Origins["sources."+name+".model"] = OriginFile
+		cfg.Origins["sources."+name+".prompt"] = OriginFile
 		cfg.Origins["sources."+name+".single_install"] = OriginFile
 	}
 
