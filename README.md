@@ -12,7 +12,7 @@ lazyrecall reads what those agents already wrote to your disk and turns it into 
 
 Then press enter, and you are back in that session - the same agent, the same working directory, right where you left off.
 
-It does not run agents, watch anything, or send your sessions anywhere. It is a reader over files that are already on your disk. Resuming is the only thing that starts a process, and only because you asked it to.
+It does not run agents, watch anything, or send your sessions anywhere. It is a reader over files that are already on your disk. Resuming a session, or starting a new one with `lazyrecall new`, is the only thing that starts a process, and only because you asked it to.
 
 ## Install
 
@@ -38,18 +38,22 @@ CGO_ENABLED=0 go build -o lazyrecall ./cmd/lazyrecall
 
 ```
 lazyrecall                  open the interactive browser
-lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--since=DAYS] [--all] [--json]
-lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all] [--json]
+lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--starred] [--since=DAYS] [--all] [--json]
+lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--starred] [--all] [--json]
 lazyrecall review    [--group=NAME] [--all] [--json]
-lazyrecall resume    [SESSION_ID|PREFIX|.] [--last] [--repo=PATH] [--agent=NAME] [--client=NAME] [--tag=NAME] [--group=NAME]
+lazyrecall resume    [SESSION_ID|PREFIX|.] [--last] [--repo=PATH] [--agent=NAME] [--client=NAME] [--tag=NAME] [--group=NAME] [--starred] [--model=M]
+lazyrecall new       --agent=NAME [--cwd=PATH] [--model=M] [--prompt=TEXT] [--name=TEXT] [--mkdir]
 lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
 lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
 lazyrecall archive   SESSION_ID | list
 lazyrecall unarchive SESSION_ID
 lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
 lazyrecall name      SESSION_ID TEXT... | SESSION_ID --clear
+lazyrecall star      SESSION_ID [--clear] | list
+lazyrecall export    SESSION_ID [--format=md|json] [--clean] [--no-redact] [--output=FILE]
 lazyrecall refresh   [--full]
-lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
+lazyrecall doctor
+lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--starred] [--all]
 lazyrecall groups    [--json]
 lazyrecall config    path|init|show
 lazyrecall version, --version, -v
@@ -57,11 +61,21 @@ lazyrecall version, --version, -v
 
 A session held somewhere other than the agent's own terminal - a Neovim CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as `[claude·acp]` and selected by `--client=acp`.
 
-`--group` narrows to one view of a session's group (see [Groups](#groups) below, and `lazyrecall groups` for the configured names on this machine): a configured group's name, `archive` for every archived session, or `unknown` for sessions no group rule or manual choice has claimed. With no `--group`, a listing shows every non-archived session regardless of group - the same as before groups existed, and the same as it looks with no `[groups.*]` configured at all.
+`--group` narrows to one view of a session's group (see [Groups](#groups) below, and `lazyrecall groups` for the configured names on this machine): a configured group's name, `archive` for every archived session, `starred` for every starred one that is not archived, or `unknown` for sessions no group rule or manual choice has claimed. `--starred` is shorthand for `--group=starred`, and the two cannot be combined. With no `--group`, a listing shows every non-archived session regardless of group - the same as before groups existed, and the same as it looks with no `[groups.*]` configured at all.
 
 `lazyrecall resume` takes a session two ways beyond the interactive picker. A `SESSION_ID` is a short handle (`3`), a full composite identifier, or an unambiguous prefix of at least 4 characters of either - `9f2a` resumes the same session `claude:cc:9f2a1b3c-...` does, as long as no other session's id or prefix starts the same way; a prefix that matches more than one session prints a short list of candidates instead of guessing, and this applies everywhere a session id is accepted (`comment`, `tag`, `archive`, `unarchive`, `group`, `resume`), not just here. `.` resumes the most recently active session in the current directory's own repository directly, with no picker - matched the same literal way `--repo=PATH` is, against a session's own recorded repository or working directory, never a path lazyrecall resolves or expands itself. `--last` resumes the most recently active session of the current listing directly, with no picker either; combined with `--repo=PATH` (and `--agent`/`--client`/`--tag`/`--group`), it resumes the newest session matching those filters. With no `SESSION_ID` and no `--last`, `lazyrecall resume` opens the numbered picker, narrowed by whichever of those filters were given.
 
 `lazyrecall name` sets lazyrecall's own name for a session, held separately from anything a source tool records - Claude Code's own rename (`sessions.name`) is untouched and still shown alongside it when the two differ. It is an annotation like a tag or a comment: it lives on the durable lineage, so it survives an index rebuild and moves with a session that continues under a new identifier. Once set, it takes over the row and Detail tab's name slot, ahead of the source-recorded name and the topic. `lazyrecall name SESSION_ID --clear` removes it, and the browser's `r` key does the same thing interactively (see [Key bindings](#key-bindings) below).
+
+`lazyrecall star SESSION_ID` stars a session, like starring an email: a `★` appears right after its handle (`#904★`), it is listed by `lazyrecall star list`, `--starred` or the Starred row in the browser's Groups panel, and `--clear` takes the star off. The list keeps its newest-first order; a star marks, it does not reorder. Like tags, comments and names, a star lives on the durable lineage and survives an index rebuild. `lazyrecall groups` counts starred sessions on a `starred N` line.
+
+`lazyrecall new --agent=NAME` starts a new session in an agent, in `--cwd` (default: the current directory), without leaving for that directory first. `--mkdir` creates the directory when it does not exist yet. `--model`, `--prompt` (the first message, so the session starts working right away) and `--name` are passed to the agent with its own flags, from the per-source templates under [Configuration](#configuration); asking for one a source has no template for is an error that names the key to add, rather than a session quietly started without it. For Claude Code and pi, lazyrecall picks the new session's id itself and prints it before handing over. `--agent` must name a single install: with two Claude installs, `--agent=claude` is refused, and you pass the install or its label (`--agent=claude-personal`, `--agent=ccp`). `lazyrecall resume --model=M` resumes a session in a different model, for the case where it went wrong and you want to try again with another one.
+
+`lazyrecall export SESSION_ID` writes the conversation as Markdown, or as JSON with `--format=json`, to stdout or to `--output=FILE` (created readable by you only). `--clean` exports the same question/answer view as the Transcript tab's clean mode. Credentials are redacted by default - API keys and tokens in the common formats (`sk-ant-…`, `ghp_…`, `AKIA…`, `xoxb-…`, bearer tokens, private-key blocks) and the value after `password:`, `token=` and the like - and `--no-redact` turns that off. It reads the same places the Transcript tab does, so it works for every source but antigravity.
+
+`lazyrecall doctor` is a read-only health report: for every install, its root, whether its resume program is on `PATH`, how many sessions the index holds for it and how many of those have lost their transcript file, and, for Claude Code, its `cleanupPeriodDays`. It refreshes nothing and writes nothing.
+
+Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) from its own config directory. lazyrecall checks each session's transcript file when it lists it: a session whose file is gone stays listed and searchable, since its prompts are still in the index, but its row is dimmed with `[gone]` in place of its end state, the Detail tab says why, and `resume` explains that the agent has nothing left to resume instead of starting it to fail. A full rebuild (`lazyrecall refresh --full`, or a schema change) drops such sessions for good, because there is nothing left on disk to rebuild them from; your tags, comments, names and stars stay in the index either way. To keep transcripts, raise the setting in each install's `settings.json`, e.g. `"cleanupPeriodDays": 3650`; `doctor` shows what each install is set to.
 
 A session carrying comments shows a small `✎N` marker on its row (e.g. `✎2` for two comments) - a hint that there is more to read on the Detail or Comments tab. On a row too narrow for everything, the topic is shortened first to keep it; the marker only gives way once keeping it would leave too little of the topic to recognize the session by.
 
@@ -78,6 +92,7 @@ A session carrying comments shows a small `✎N` marker on its row (e.g. `✎2` 
 | `enter` | Resume the selected session (Sessions); filter by the selected value (Groups, Agents, Repos, Tags) |
 | `esc` | Clear what this panel is filtering by |
 | `[` / `]` | Previous / next tab in the detail pane (Detail, Prompts, Transcript, Comments) |
+| `z` | Zoom the detail pane to the whole frame, or back (`esc` also leaves); while zoomed only scrolling, `[`/`]`, `n`/`N`, `t`, `?` and `q` act |
 | `n` / `N` | On the Transcript tab, scroll to the next / previous occurrence of the search phrase |
 | `t` | On the Transcript tab, toggle between the clean question/answer view and the full technical transcript |
 | `d` | Take the tag under the cursor off the selected session (Tags panel) |
@@ -91,8 +106,9 @@ A session carrying comments shows a small `✎N` marker on its row (e.g. `✎2` 
 | `c` / `C` | Add / remove a comment on the selected session |
 | `r` | Set or clear lazyrecall's own name for the selected session (blank input clears it) |
 | `a` | Archive / unarchive the selected session |
+| `*` | Star / unstar the selected session |
 | `.` | Toggle showing sessions the hide rules and the archive flag suppress |
-| `?` | Show this list |
+| `?` | Show this list, with the running version in its title |
 | `q`, `Ctrl-C` | Quit |
 
 The Sessions panel groups its rows under dim separators - `── Today ──`, `── Yesterday ──`, `── Last 7 days ──`, `── Last 30 days ──`, `── Older ──`, and `── Unknown date ──` for a session with no recorded activity time - based on each session's last activity in local time, with a separator only for a bucket that actually has a session in it. They only ever appear while the list is sorted newest-first, which is every ordinary view (the plain listing, the `/` row filter, and `s` full-text search all keep that order); moving, resuming, and everything else about the list is unaffected either way, since the separators are not rows you can select. Turn them off with `browse.date_headers = false` in the config file (see [Configuration](#configuration)).
@@ -110,6 +126,8 @@ The right-hand pane has four tabs, reached with `[` and `]`.
 It works for every source but one, from whichever place that source keeps its conversation. `claude`, `pi` and `omp` write transcript files, which are read directly. `hermes`, `goose`, `opencode` and `kilo` write no files at all, but the conversation is in the same database lazyrecall already reads for the session list, so it is read back from there - no agent is ever invoked to fetch it. `antigravity` is the exception: its per-conversation detail is protobuf with no available schema, so the tab says the format cannot be decoded rather than reporting an error. A transcript file the agent has since cleaned up is reported in the same spirit.
 
 **Comments** is your own freeform notes on the session, with the ids `comment rm` takes.
+
+Press `z` to give the detail pane the whole frame, which is the comfortable way to read a long transcript; `z` or `esc` brings the panels back.
 
 ## Supported sources
 
@@ -136,6 +154,11 @@ Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZ
 | --- | --- |
 | `sources.<agent>.roots` | `claude`: `["~/.claude-personal", "~/.claude"]`, `pi`: `["~/.pi"]`, `omp`: `["~/.omp"]`, `hermes`: `["~/.hermes"]`, `goose`: `["~/.local/share/goose/sessions"]`, `opencode`: `["~/.local/share/opencode"]`, `kilo`: `["~/.local/share/kilo"]`, `antigravity`: `["~/.gemini/antigravity-cli"]` |
 | `sources.<agent>.resume` | `claude --resume {id}`, `pi --session {id}`, `omp --resume {id}`, `hermes --resume {id}`, `goose session --resume --session-id {id}`, `opencode --session {id}`, `kilo --session {id}`, `agy --conversation {id}` |
+| `sources.<agent>.new` | `claude`, `pi`, `omp`, `hermes`, `goose session`, `opencode`, `kilo`, `agy` |
+| `sources.<agent>.new_id` | `claude`, `pi`: `--session-id {id}`; the rest: none |
+| `sources.<agent>.new_name` | `claude`, `pi`: `--name {name}`; the rest: none |
+| `sources.<agent>.model` | `claude`, `pi`: `--model {model}`; `omp`: `--model={model}`; the rest: none |
+| `sources.<agent>.prompt` | `claude`, `pi`, `omp`: `{prompt}` (the first message, as the last argument); the rest: none |
 | `sources.<agent>.env_var` | `claude`: `CLAUDE_CONFIG_DIR`; the rest: none |
 | `sources.<agent>.single_install` | everything but `claude`: `true` |
 | `labels` | (none; an install's label falls back to its own name) |
@@ -147,11 +170,11 @@ Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZ
 | `hide.min_messages` | `0` |
 | `hide.paths` | `[]` |
 | `browse.show_archived` | `false` |
-| `browse.default_group` | `""` (All); also accepts `all`, `archive`, `unknown`, or a configured group's name - anything else is a config error naming the file and the bad value |
+| `browse.default_group` | `""` (All); also accepts `all`, `archive`, `starred`, `unknown`, or a configured group's name - anything else is a config error naming the file and the bad value |
 | `browse.transcript` | `"clean"`; also accepts `"full"` - anything else is a config error naming the file and the bad value |
 | `browse.date_headers` | `true` |
 
-`resume` is an argv template in which `{id}` is replaced with the session id; `env_var` names the environment variable set to the install's root when resuming; `single_install` marks a source that can only ever have one install, which is then named after the source itself (`omp`, `pi`, ...), while a source that can have several installs (`claude`) names each one after its root directory (`claude`, `claude-personal`).
+`resume` is an argv template in which `{id}` is replaced with the session id; `new` is the command that starts a new session, and `new_id`, `new_name`, `model` and `prompt` are appended to it - `model` also to `resume` - only when that value is given, each with its own placeholder replaced (the flags for `claude`, `pi` and `omp` were checked against their `--help`; set the others yourself if you want `--model` or `--prompt` for them). Every template is an argument list, never a shell string, so a prompt reaches the agent exactly as typed; `env_var` names the environment variable set to the install's root when resuming; `single_install` marks a source that can only ever have one install, which is then named after the source itself (`omp`, `pi`, ...), while a source that can have several installs (`claude`) names each one after its root directory (`claude`, `claude-personal`).
 
 `lazyrecall config init` writes a commented-out copy of these defaults, and `lazyrecall config show` prints the effective config with each value's provenance (default, file, env, or flag).
 
@@ -166,6 +189,8 @@ Instead, a session belongs to a **group**, a view computed each time you query, 
 1. a manual override you set on the session (`p` in the browser, or `lazyrecall group SESSION NAME`) - this sticks even across an index rebuild, and moves with a session when it continues under a new identifier
 2. otherwise, the configured group whose path is the longest prefix of the session's working directory
 3. otherwise, **Unknown**
+
+**Starred** is a view like Archive rather than a group: it lists every non-archived starred session, whatever group it is filed under, and its row sits right under All in the Groups panel whenever something is starred.
 
 **Archive** is unchanged: archiving a session (`a`, or `lazyrecall archive`) hides it from every group's listing until you ask to see everything, and it remembers which group to return to if you unarchive it.
 
@@ -197,7 +222,7 @@ With that config, a work-account Claude session that happens to run under `~/per
 
 A group's `color` is optional. It accepts an ANSI color name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`), a `bright-`-prefixed variant of one of those (e.g. `bright-blue`), or a 24-bit hex triplet like `#3355ff` - case-insensitive either way. It is drawn on the group's own name in the Groups panel, and on the handle (`#904`) of every session filed under it, in the browser and in `lazyrecall list`'s plain-text output alike. A session's handle is white by default; a session with no group at all uses this white default too, unless `unknown`'s own color (below) applies.
 
-Archive and Unknown - the two built-in views alongside a session's real group - can be colored the same way, even though `archive` and `unknown` stay reserved and can never be a real group's name: a `[groups.archive]` or `[groups.unknown]` table may set `color` and nothing else (`paths` there is a config error, since neither is a place a session is ever filed by working directory). Archived colors the handle of every archived session and the Archive row's own label in the Groups panel; unknown does the same for a session with no group and for the Unknown row. When a session is both archived and would otherwise carry a group's color, archive wins; a session that does have a configured group but that group has no color of its own stays white rather than picking up the unknown color, since it isn't actually groupless.
+Archive and Unknown - the two built-in views alongside a session's real group - can be colored the same way, even though `archive` and `unknown` stay reserved and can never be a real group's name (`all` and `starred` are reserved too, with no color table): a `[groups.archive]` or `[groups.unknown]` table may set `color` and nothing else (`paths` there is a config error, since neither is a place a session is ever filed by working directory). Archived colors the handle of every archived session and the Archive row's own label in the Groups panel; unknown does the same for a session with no group and for the Unknown row. When a session is both archived and would otherwise carry a group's color, archive wins; a session that does have a configured group but that group has no color of its own stays white rather than picking up the unknown color, since it isn't actually groupless.
 
 ```toml
 [groups.archive]
