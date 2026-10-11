@@ -5,7 +5,10 @@
 package search
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -117,6 +120,14 @@ type Item struct {
 	// sources, which record no transcript file at all - a reader must
 	// treat nil as "this source keeps no transcript", not as an error.
 	TranscriptPath *string
+	// TranscriptGone is true when the session records a transcript file
+	// and that file no longer exists on disk - usually the agent's own
+	// retention cleanup (Claude Code's cleanupPeriodDays deletes old
+	// transcripts after the last refresh indexed them). It is checked
+	// when the item is loaded and deliberately not stored in the index, so
+	// it has no schema of its own; a nil or empty TranscriptPath leaves it
+	// false, since a source that keeps no transcript has not lost one.
+	TranscriptGone bool
 	// SourceSessionID is the identifier the source itself uses for this
 	// session, as distinct from SessionID, which is LazyRecall's composite
 	// "<source>:<profile>:<id>". It is what a source's own database has to
@@ -276,6 +287,16 @@ func (row itemRow) toItem() Item {
 	}
 	if row.Tags != nil && *row.Tags != "" {
 		it.Tags = strings.Split(*row.Tags, "\x1f")
+	}
+	// A recorded transcript that is gone is reported, not hidden: the row is
+	// still listed and searchable, the caller (resume) decides what to do
+	// about it. Only a definite "no such file" counts; any other stat error
+	// (a permission problem, say) leaves the session unflagged, since we
+	// cannot tell whether the file is really gone.
+	if row.TranscriptPath != nil && *row.TranscriptPath != "" {
+		if _, err := os.Stat(*row.TranscriptPath); errors.Is(err, fs.ErrNotExist) {
+			it.TranscriptGone = true
+		}
 	}
 	return it
 }
