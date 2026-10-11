@@ -4270,3 +4270,163 @@ func TestViewFitsTerminalWithDateHeaders(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------
+// z: zoom the detail pane
+// ---------------------------------------------------------------------
+
+// z gives the detail pane the whole frame and z again (or Esc) restores the
+// layout and the focus it interrupted. The zoom is a view, not a focus
+// move: the panel the cursor was on is the one it comes back to, and the
+// zoomed frame is exactly the terminal's height in lines - the same
+// invariant TestViewFitsTerminal guards for every other layout, here
+// checked at equality because a zoomed body has no second column or stack
+// to pad against.
+func TestZoomFillsTheFrameWithTheDetailPaneAndReturns(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = update(t, m, keyRunes("4")) // Tags: a focus that is not Sessions, so the restore is visible
+	if m.focus != panelTags {
+		t.Fatalf("focus is %v, want Tags for this test to mean anything", m.focus)
+	}
+	if !strings.Contains(m.View(), "Groups") {
+		t.Fatal("the unzoomed frame does not draw the Groups panel; the zoom assertion below proves nothing")
+	}
+
+	m = update(t, m, keyRunes("z"))
+	if !m.zoomed {
+		t.Fatal("z did not zoom the detail pane")
+	}
+	if m.focus != panelDetail {
+		t.Errorf("zoom left focus on %v, want the detail pane", m.focus)
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 40 {
+		t.Errorf("the zoomed frame is %d lines, want the terminal's 40", len(lines))
+	}
+	for i, l := range lines {
+		if got := visibleWidth(l); got > 100 {
+			t.Errorf("zoomed line %d is %d columns wide: %q", i, got, l)
+		}
+	}
+	if strings.Contains(m.View(), "Groups") {
+		t.Errorf("the zoomed frame still draws the Groups panel:\n%s", m.View())
+	}
+	if !strings.Contains(m.View(), "id:") {
+		t.Errorf("the zoomed frame is not the detail pane:\n%s", m.View())
+	}
+	if m.geometry().sessionsH != 0 || m.geometry().groupsH != 0 {
+		t.Errorf("zoomed geometry still gives other panels room: %+v", m.geometry())
+	}
+
+	m = update(t, m, keyRunes("z"))
+	if m.zoomed {
+		t.Error("a second z did not unzoom")
+	}
+	if m.focus != panelTags {
+		t.Errorf("unzoom restored focus to %v, want the Tags panel the zoom interrupted", m.focus)
+	}
+	if !strings.Contains(m.View(), "Groups") {
+		t.Error("the unzoomed frame does not draw the Groups panel again")
+	}
+
+	// Esc leaves the zoom the same way, from the same state.
+	m = update(t, m, keyRunes("z"))
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.zoomed {
+		t.Error("esc did not leave the zoom")
+	}
+	if m.focus != panelTags {
+		t.Errorf("esc left focus on %v, want Tags restored", m.focus)
+	}
+}
+
+// While zoomed only the detail pane's own keys act. Movement scrolls its
+// viewport, and the keys that in the normal layout change focus or resume a
+// session are inert: acting on a panel that is not on screen, or quitting
+// into a session whose row the user can no longer confirm, is exactly what
+// the zoom's key gate exists to prevent.
+func TestZoomedKeysActOnTheDetailPaneOnly(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	rows := make([]map[string]any, 0, promptTabLimit)
+	for i := 0; i < promptTabLimit; i++ {
+		rows = append(rows, map[string]any{
+			"session_id": "claude:p:s0", "kind": "prompt",
+			"text": fmt.Sprintf("prompt number %d long enough to wrap onto a second line", i),
+		})
+	}
+	b := db.NewBatch()
+	if err := b.BulkInsert("prompt_fts", []string{"session_id", "kind", "text"}, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{Installs: testInstalls("claude-personal")})
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.tab = tabPrompts
+	m = update(t, m, keyRunes("z"))
+	if !m.zoomed {
+		t.Fatal("z did not zoom")
+	}
+
+	// Render once so the viewport holds the prompts; the pane is taller than
+	// the terminal can show, so it is scrollable.
+	m.View()
+	if inner := m.geometry().detailInner; len(strings.Split(m.detailContent(RenderOptions{Width: m.detail.Width}), "\n")) <= inner {
+		t.Fatalf("the fixture's prompts are not taller than the %d-row pane; the scroll assertion below proves nothing", inner)
+	}
+
+	before := m.detail.YOffset
+	m = update(t, m, keyRunes("j"))
+	if m.detail.YOffset == before {
+		t.Errorf("j did not scroll the zoomed detail pane (offset stayed at %d)", before)
+	}
+
+	// 1 would focus Groups, Tab would move focus, Enter would resume the
+	// session and quit. None may do anything while zoomed.
+	for _, k := range []string{"1", "2"} {
+		m = update(t, m, keyRunes(k))
+		if m.focus != panelDetail {
+			t.Errorf("%q changed focus to %v while zoomed", k, m.focus)
+		}
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.focus != panelDetail {
+		t.Errorf("tab changed focus to %v while zoomed", m.focus)
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectedOK {
+		t.Error("enter resumed a session while zoomed")
+	}
+	if !m.zoomed {
+		t.Error("a key outside the zoom's set left the zoom")
+	}
+	if m.mode != modeNone {
+		t.Errorf("a key outside the zoom's set opened input mode %v", m.mode)
+	}
+}
+
+// z with nothing selected has no pane to fill - the detail pane would only
+// say "No session selected." - so it is a no-op rather than a frame filled
+// with an empty box.
+func TestZoomWithNoSessionsDoesNothing(t *testing.T) {
+	db := browseTestDB(t)
+	m := newTestBrowser(db, "p", BrowserOptions{Installs: testInstalls("claude")})
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	if m.current() != nil {
+		t.Fatal("the empty fixture has a selected session; the no-op assertion below proves nothing")
+	}
+	before := m.focus
+	m = update(t, m, keyRunes("z"))
+	if m.zoomed {
+		t.Error("z zoomed with no session selected")
+	}
+	if m.focus != before {
+		t.Errorf("z with no session moved focus from %v to %v", before, m.focus)
+	}
+	if strings.Contains(m.View(), "id:") {
+		t.Errorf("the frame was replaced by an empty detail pane:\n%s", m.View())
+	}
+}
