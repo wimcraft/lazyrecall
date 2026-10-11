@@ -147,13 +147,13 @@ func PathGroupPath(groups []config.Group, cwd string) (name, path string) {
 
 // ValidateGroup checks a --group value (or the browser popup's choice, from
 // Stage E) against the configured groups: "" (All), "archive", "unknown",
-// and any configured group's name are valid; anything else is an error
-// listing every valid value, so a typo is reported instead of silently
+// "starred", and any configured group's name are valid; anything else is an
+// error listing every valid value, so a typo is reported instead of silently
 // matching nothing. It is one helper so the CLI and the browser agree on
 // exactly the same set of valid values.
 func ValidateGroup(cfg config.Config, name string) error {
 	switch name {
-	case "", "archive", "unknown":
+	case "", "archive", "unknown", "starred":
 		return nil
 	}
 	for _, g := range cfg.Groups {
@@ -161,8 +161,8 @@ func ValidateGroup(cfg config.Config, name string) error {
 			return nil
 		}
 	}
-	valid := make([]string, 0, len(cfg.Groups)+3)
-	valid = append(valid, "all", "archive", "unknown")
+	valid := make([]string, 0, len(cfg.Groups)+4)
+	valid = append(valid, "all", "archive", "unknown", "starred")
 	for _, g := range cfg.Groups {
 		valid = append(valid, g.Name)
 	}

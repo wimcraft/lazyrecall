@@ -1111,6 +1111,72 @@ func TestFilterByGroupExcludesArchivedFromNamedGroupToo(t *testing.T) {
 	}
 }
 
+// TestStarredViewListsOnlyStarredNonArchived covers the reserved
+// Filter.Group="starred" view: every non-archived starred session, whatever
+// group it otherwise belongs to - the star annotate.SetStarred records, read
+// back through itemColumns. The view excludes an archived starred session
+// exactly as every other group view does (hide_archived), and leaves the
+// ordinary All view untouched, with Starred carried on each item.
+func TestStarredViewListsOnlyStarredNonArchived(t *testing.T) {
+	db := testDB(t)
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "starred_at", "archived_at"}, []map[string]any{
+		{"id": "lin-starred", "profile": "p", "orphaned": 0, "starred_at": 1000, "archived_at": nil},
+		{"id": "lin-starred-archived", "profile": "p", "orphaned": 0, "starred_at": 1000, "archived_at": 2000},
+		{"id": "lin-plain", "profile": "p", "orphaned": 0, "starred_at": nil, "archived_at": nil},
+		{"id": "lin-plain-archived", "profile": "p", "orphaned": 0, "starred_at": nil, "archived_at": 2000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	for id, lineage := range map[string]string{
+		"starred":          "lin-starred",
+		"starred-archived": "lin-starred-archived",
+		"plain":            "lin-plain",
+		"plain-archived":   "lin-plain-archived",
+	} {
+		seedSession(t, db, map[string]any{
+			"id": "claude:p:" + id, "source": "claude", "source_session_id": id, "lineage_id": lineage,
+			"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+		})
+	}
+
+	starred, err := List(db, Filter{Group: "starred"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starred) != 1 || starred[0].SessionID != "claude:p:starred" {
+		t.Fatalf("--group=starred: expected only the non-archived starred session, got %+v", starred)
+	}
+	if !starred[0].Starred {
+		t.Errorf("--group=starred: expected Starred true, got %+v", starred[0])
+	}
+
+	all, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("All: expected the two non-archived sessions, got %+v", all)
+	}
+	byID := map[string]Item{}
+	for _, it := range all {
+		byID[it.SessionID] = it
+	}
+	if !byID["claude:p:starred"].Starred {
+		t.Errorf("All: expected the starred session to carry Starred, got %+v", byID["claude:p:starred"])
+	}
+	if byID["claude:p:plain"].Starred {
+		t.Errorf("All: expected the unstarred session to have Starred false, got %+v", byID["claude:p:plain"])
+	}
+
+	if err := ValidateGroup(config.Config{}, "starred"); err != nil {
+		t.Errorf("ValidateGroup(\"starred\") = %v, want nil", err)
+	}
+}
+
 // TestFilterByGroupUnknown covers Filter.Group="unknown": non-archived
 // sessions with no effective group.
 func TestFilterByGroupUnknown(t *testing.T) {
