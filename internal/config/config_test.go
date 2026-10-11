@@ -939,3 +939,92 @@ func TestSingleInstallDefaultsAndOverride(t *testing.T) {
 		t.Errorf("origin for an untouched source = %q, want %q", got, OriginDefault)
 	}
 }
+
+// TestNewSessionTemplateDefaults pins the five argv templates a source uses
+// to start a new session (internal/config: Source.New/NewID/NewName/Model/
+// Prompt) exactly as the agent flags were checked - a future edit to the
+// defaults fails here instead of silently changing what `lazyrecall new`
+// runs.
+func TestNewSessionTemplateDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		source string
+		new    []string
+		newID  []string
+		newNam []string
+		model  []string
+		prompt []string
+	}{
+		{"claude", []string{"claude"}, []string{"--session-id", "{id}"}, []string{"--name", "{name}"}, []string{"--model", "{model}"}, []string{"{prompt}"}},
+		{"pi", []string{"pi"}, []string{"--session-id", "{id}"}, []string{"--name", "{name}"}, []string{"--model", "{model}"}, []string{"{prompt}"}},
+		{"omp", []string{"omp"}, nil, nil, []string{"--model={model}"}, []string{"{prompt}"}},
+		{"hermes", []string{"hermes"}, nil, nil, nil, nil},
+		{"goose", []string{"goose", "session"}, nil, nil, nil, nil},
+		{"opencode", []string{"opencode"}, nil, nil, nil, nil},
+		{"kilo", []string{"kilo"}, nil, nil, nil, nil},
+		{"antigravity", []string{"agy"}, nil, nil, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.source, func(t *testing.T) {
+			s := cfg.Sources[tc.source]
+			if !reflect.DeepEqual(s.New, tc.new) {
+				t.Errorf("New = %v, want %v", s.New, tc.new)
+			}
+			if !reflect.DeepEqual(s.NewID, tc.newID) {
+				t.Errorf("NewID = %v, want %v", s.NewID, tc.newID)
+			}
+			if !reflect.DeepEqual(s.NewName, tc.newNam) {
+				t.Errorf("NewName = %v, want %v", s.NewName, tc.newNam)
+			}
+			if !reflect.DeepEqual(s.Model, tc.model) {
+				t.Errorf("Model = %v, want %v", s.Model, tc.model)
+			}
+			if !reflect.DeepEqual(s.Prompt, tc.prompt) {
+				t.Errorf("Prompt = %v, want %v", s.Prompt, tc.prompt)
+			}
+		})
+	}
+}
+
+// TestFileSourceTableReplacesNewSessionTemplates covers the all-or-nothing
+// override for the new-session templates: a [sources.claude] table that sets
+// only `new` must zero the four the table omits, exactly as Resume and
+// EnvVar are zeroed - not keep the defaults.
+func TestFileSourceTableReplacesNewSessionTemplates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := writeConfig(t, "[sources.claude]\nnew = [\"x\"]\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Sources["claude"].New; len(got) != 1 || got[0] != "x" {
+		t.Errorf("claude New = %v, want [x]", got)
+	}
+	if cfg.Sources["claude"].NewID != nil {
+		t.Errorf("claude NewID = %v, want nil (replaced by the file)", cfg.Sources["claude"].NewID)
+	}
+	if cfg.Sources["claude"].NewName != nil {
+		t.Errorf("claude NewName = %v, want nil (replaced by the file)", cfg.Sources["claude"].NewName)
+	}
+	if cfg.Sources["claude"].Model != nil {
+		t.Errorf("claude Model = %v, want nil (replaced by the file)", cfg.Sources["claude"].Model)
+	}
+	if cfg.Sources["claude"].Prompt != nil {
+		t.Errorf("claude Prompt = %v, want nil (replaced by the file)", cfg.Sources["claude"].Prompt)
+	}
+	if got := cfg.Origins["sources.claude.new"]; got != OriginFile {
+		t.Errorf("Origins[sources.claude.new] = %q, want %q", got, OriginFile)
+	}
+	if got := cfg.Origins["sources.claude.model"]; got != OriginFile {
+		t.Errorf("Origins[sources.claude.model] = %q, want %q", got, OriginFile)
+	}
+}

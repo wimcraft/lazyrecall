@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/wimcraft/lazyrecall/internal/config"
 )
 
 // Target is the session being resumed.
@@ -48,6 +50,21 @@ type Target struct {
 	// resumed.
 	Resume []string
 
+	// Model is the model the caller asked to resume with, if any
+	// (lazyrecall resume --model). Empty means resume in whatever model
+	// the agent would otherwise choose, which is the behaviour every
+	// resume had before this option existed. When set, agentCommand
+	// appends ModelTemplate (with "{model}" replaced) after the resume
+	// argv; a Model with no ModelTemplate is a hard failure (Resume),
+	// not a silently dropped option.
+	Model string
+
+	// ModelTemplate is the argv template a source uses to select a model,
+	// with "{model}" standing in for the value (internal/config: a
+	// source's Model). Resolved by the caller and passed in, like Resume.
+	// Empty/nil means the source has no configured model flag.
+	ModelTemplate []string
+
 	// ProfileEnv carries environment variable overrides needed to run the
 	// agent against the installation this session's own profile belongs to
 	// - e.g. CLAUDE_CONFIG_DIR, for a claude session whose profile is not
@@ -75,10 +92,11 @@ type Target struct {
 // agentCommand is the program and argument vector that resumes a specific
 // session non-interactively, built by substituting the session id into the
 // source's configured argv template (t.Resume; internal/config: a source's
-// Resume). argv[0] is conventionally the program's own name, matching what
-// that program would see if invoked directly from a shell; the executable
-// itself is resolved separately, via exec.LookPath, before anything else
-// happens (decision 2).
+// Resume). When t.Model is set, the source's model template (t.ModelTemplate)
+// is appended after it, with "{model}" replaced. argv[0] is conventionally
+// the program's own name, matching what that program would see if invoked
+// directly from a shell; the executable itself is resolved separately, via
+// exec.LookPath, before anything else happens (decision 2).
 //
 // The result is deliberately an argv vector, never a shell command string:
 // the config file is user-supplied input, and execAgent execs the program
@@ -95,7 +113,157 @@ func agentCommand(t Target) (program string, argv []string, ok bool) {
 	for i, el := range t.Resume {
 		argv[i] = strings.ReplaceAll(el, "{id}", t.SourceSessionID)
 	}
+	if t.Model != "" {
+		for _, el := range t.ModelTemplate {
+			argv = append(argv, strings.ReplaceAll(el, "{model}", t.Model))
+		}
+	}
 	return argv[0], argv, true
+}
+
+// missingSettingMessage explains that a source cannot honour a value the
+// caller asked for because its argv template for that value is empty,
+// naming the field in the caller's own vocabulary and the exact config key
+// to add under [sources.<source>], so the fix is copyable. Used for both a
+// resume's model and a launch's id/name/model/prompt, which share the shape.
+func missingSettingMessage(source, field, key string) string {
+	return fmt.Sprintf("%s has no %s setting configured (%s = [...] under [sources.%s]).", source, field, key, source)
+}
+
+// LaunchTarget describes a new session to start. Unlike Target, which
+// resumes a session that already exists and so inherits its working
+// directory, everything here is chosen: the source, the directory, and
+// optionally the session's id, name, model and first prompt.
+type LaunchTarget struct {
+	// Source names the agent to start; only used in failure messages.
+	Source string
+
+	// CWD is the directory the agent is started in. Required, and has no
+	// fallback: a new session has no recorded working directory to offer
+	// instead. When the directory is missing, Mkdir decides whether
+	// LazyRecall creates it or refuses.
+	CWD   string
+	Mkdir bool
+
+	// ID, Name, Model and Prompt are the optional choices; an empty one
+	// contributes nothing to the argv. A non-empty one whose template in
+	// Templates is empty is a hard failure, never a silently dropped
+	// option - asking for a model a source cannot select must not look
+	// like it worked.
+	ID     string
+	Name   string
+	Model  string
+	Prompt string
+
+	// Templates is the source's configured argv templates (internal/config:
+	// a Source). New is required; the rest are consulted only for the
+	// values above that are set. Passed in resolved, exactly like
+	// Target.Resume, so resume stays a pure function of its arguments and
+	// never reads the config itself.
+	Templates config.Source
+
+	// ProfileEnv is the environment override for the installation this
+	// launch targets, the same shape (and the same purpose) as
+	// Target.ProfileEnv for a resume.
+	ProfileEnv map[string]string
+}
+
+// launchCommand is the program and argument vector that starts a new
+// session: t.Templates.New, then the id, name, model and prompt templates
+// for whichever values are set, each element's placeholders replaced. Like
+// agentCommand the result is an argv vector, never a shell string -
+// substitution is strings.ReplaceAll per element so a value cannot become a
+// shell command no matter what it contains.
+func launchCommand(t LaunchTarget) (program string, argv []string) {
+	tpl := t.Templates
+	argv = append(argv, tpl.New...)
+	if t.ID != "" {
+		argv = append(argv, tpl.NewID...)
+	}
+	if t.Name != "" {
+		argv = append(argv, tpl.NewName...)
+	}
+	if t.Model != "" {
+		argv = append(argv, tpl.Model...)
+	}
+	if t.Prompt != "" {
+		argv = append(argv, tpl.Prompt...)
+	}
+	for i, el := range argv {
+		el = strings.ReplaceAll(el, "{id}", t.ID)
+		el = strings.ReplaceAll(el, "{name}", t.Name)
+		el = strings.ReplaceAll(el, "{model}", t.Model)
+		el = strings.ReplaceAll(el, "{prompt}", t.Prompt)
+		argv[i] = el
+	}
+	return argv[0], argv
+}
+
+// Launch starts a new session in t's source, in t's directory, and hands
+// off to its agent the same way Resume does - replacing the running
+// LazyRecall process, or exiting with the agent's status on the fallback.
+// It never writes to another tool's data: the only side effects are
+// optionally creating the requested directory and handing off to an agent.
+func Launch(t LaunchTarget) Outcome {
+	if len(t.Templates.New) == 0 {
+		return Outcome{Failed: true, Message: fmt.Sprintf("%s has no new-session command configured (new = [...] under [sources.%s]).", t.Source, t.Source)}
+	}
+
+	// A value the caller asked for that its source cannot express is a
+	// hard failure, checked before anything touches the disk: starting an
+	// agent without the model or name that was requested would look like
+	// success while silently ignoring the request.
+	for _, opt := range []struct {
+		value, field, key string
+		tpl               []string
+	}{
+		{t.ID, "session id", "new_id", t.Templates.NewID},
+		{t.Name, "name", "new_name", t.Templates.NewName},
+		{t.Model, "model", "model", t.Templates.Model},
+		{t.Prompt, "prompt", "prompt", t.Templates.Prompt},
+	} {
+		if opt.value != "" && len(opt.tpl) == 0 {
+			return Outcome{Failed: true, Message: missingSettingMessage(t.Source, opt.field, opt.key)}
+		}
+	}
+
+	// The directory is the one requirement a launch has no fallback for
+	// (spec session-resume's "makes no other change" sibling): it is
+	// either there, created on request, or the launch stops.
+	if fi, err := os.Stat(t.CWD); err != nil {
+		if !os.IsNotExist(err) {
+			return Outcome{Failed: true, Message: fmt.Sprintf("could not check %q: %v", t.CWD, err)}
+		}
+		if !t.Mkdir {
+			return Outcome{Failed: true, Message: fmt.Sprintf("%q does not exist; pass --mkdir to create it.", t.CWD)}
+		}
+		if err := os.MkdirAll(t.CWD, 0o755); err != nil {
+			return Outcome{Failed: true, Message: fmt.Sprintf("could not create %q: %v", t.CWD, err)}
+		}
+	} else if !fi.IsDir() {
+		return Outcome{Failed: true, Message: fmt.Sprintf("%q is not a directory.", t.CWD)}
+	}
+
+	program, argv := launchCommand(t)
+
+	path, err := exec.LookPath(program)
+	if err != nil {
+		return Outcome{Failed: true, Message: fmt.Sprintf("%s is not installed; a session cannot be started without it.", program)}
+	}
+
+	if err := os.Chdir(t.CWD); err != nil {
+		return Outcome{Failed: true, Message: fmt.Sprintf("could not change to %q: %v", t.CWD, err)}
+	}
+
+	env := mergeEnv(os.Environ(), t.ProfileEnv)
+	if err := execAgent(path, argv, env); err != nil {
+		return Outcome{Failed: true, Message: fmt.Sprintf("could not start %s: %v", program, err)}
+	}
+
+	// Unreachable when the agent actually started, for the same reason as
+	// in Resume: execAgent either replaced this process or exited with the
+	// agent's status. A safety net, not a panic.
+	return Outcome{Failed: true, Message: "launch ended unexpectedly"}
 }
 
 // Outcome describes why resumption did not place the user into the session.
@@ -194,6 +362,14 @@ func Resume(t Target) Outcome {
 	program, argv, ok := agentCommand(t)
 	if !ok {
 		return Outcome{Failed: true, Message: fmt.Sprintf("%q is not an agent lazyrecall knows how to resume.", t.Source)}
+	}
+
+	// A model the caller asked for that this source cannot select is a
+	// hard failure before program lookup, not a resume that silently runs
+	// the default model - the whole point of --model is that the user
+	// chose one.
+	if t.Model != "" && len(t.ModelTemplate) == 0 {
+		return Outcome{Failed: true, Message: missingSettingMessage(t.Source, "model", "model")}
 	}
 
 	// Resolve the program before touching anything else (decision 2; spec
