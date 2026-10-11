@@ -1908,3 +1908,139 @@ func TestNewSessionIDShape(t *testing.T) {
 		t.Errorf("two calls returned the same id %q", first)
 	}
 }
+
+// The transcript below is synthetic, hand-written test data - never real
+// session content. It is copied from internal/cli/transcript_test.go rather
+// than imported because that package's test helpers are not visible here.
+const fixtureTranscript = `{"type":"user","message":{"role":"user","content":"why is the migration failing"},"cwd":"/work/repo","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The migration is missing a down step."}],"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:01Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit"}],"stop_reason":"tool_use"},"timestamp":"2026-01-01T00:00:02Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]},"timestamp":"2026-01-01T00:00:03Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Added the missing migration step."}],"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:04Z"}
+`
+
+// setupExportEnv seeds a single claude session (handle 5) whose transcript
+// path is returned so a test can point it at a real file or delete it. It
+// mirrors setupGroupTestEnv's temp-home wiring plus a sessions row carrying
+// the transcript_path the export reads through.
+func setupExportEnv(t *testing.T, transcriptPath string) {
+	t.Helper()
+	install, db := setupGroupTestEnv(t, "")
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "handle"}, []map[string]any{
+		{"id": "lin1", "profile": install, "orphaned": 0, "handle": 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "origin", "transcript_path"}, []map[string]any{
+		{"id": "claude:" + install + ":s1", "source": "claude", "source_session_id": "s1", "lineage_id": "lin1", "end_state": "completed", "resumable": 1, "origin": "interactive", "transcript_path": transcriptPath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestExportCommandWritesMarkdownAndJSON covers the export verb's two
+// formats: Markdown (the default) as a title-led document carrying the
+// prompt text, and JSON as an object with a turns array.
+func TestExportCommandWritesMarkdownAndJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(path, []byte(fixtureTranscript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setupExportEnv(t, path)
+
+	out, runErr := runCaptured(t, []string{"export", "--no-refresh", "5"})
+	if runErr != nil {
+		t.Fatalf("run(export 5): %v", runErr)
+	}
+	if !strings.HasPrefix(out, "# ") {
+		t.Errorf("markdown export should start with a title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "why is the migration failing") {
+		t.Errorf("markdown export is missing the prompt text:\n%s", out)
+	}
+
+	out, runErr = runCaptured(t, []string{"export", "--no-refresh", "5", "--format=json"})
+	if runErr != nil {
+		t.Fatalf("run(export 5 --format=json): %v", runErr)
+	}
+	var doc struct {
+		Turns []any `json:"turns"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("export --format=json is not valid JSON: %v\n%s", err, out)
+	}
+	if len(doc.Turns) == 0 {
+		t.Errorf("expected a non-empty turns array, got:\n%s", out)
+	}
+}
+
+// TestExportCommandRejectsUnknownFormat covers the --format gate: anything
+// other than md or json is refused rather than silently defaulting.
+func TestExportCommandRejectsUnknownFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(path, []byte(fixtureTranscript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setupExportEnv(t, path)
+
+	_, runErr := runCaptured(t, []string{"export", "--no-refresh", "5", "--format=txt"})
+	if runErr == nil {
+		t.Fatal("expected --format=txt to be refused")
+	}
+	if !strings.Contains(runErr.Error(), "--format must be md or json") {
+		t.Errorf("error = %q, want the --format message", runErr.Error())
+	}
+}
+
+// TestExportCommandWritesOutputFile covers --output: the document goes to
+// the named file (mode 0600, since a transcript is private) and nothing is
+// printed to stdout.
+func TestExportCommandWritesOutputFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(path, []byte(fixtureTranscript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setupExportEnv(t, path)
+	dest := filepath.Join(t.TempDir(), "out.md")
+
+	out, runErr := runCaptured(t, []string{"export", "--no-refresh", "5", "--output=" + dest})
+	if runErr != nil {
+		t.Fatalf("run(export 5 --output): %v", runErr)
+	}
+	if out != "" {
+		t.Errorf("expected nothing on stdout with --output, got:\n%s", out)
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("output file mode = %v, want 0600", fi.Mode().Perm())
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "why is the migration failing") {
+		t.Errorf("output file is missing the conversation:\n%s", body)
+	}
+}
+
+// TestExportCommandFailsWhenTranscriptGone covers a session whose recorded
+// transcript was deleted: the export refuses with a message naming the
+// cause rather than surfacing a raw file error.
+func TestExportCommandFailsWhenTranscriptGone(t *testing.T) {
+	setupExportEnv(t, filepath.Join(t.TempDir(), "gone.jsonl"))
+
+	_, runErr := runCaptured(t, []string{"export", "--no-refresh", "5"})
+	if runErr == nil {
+		t.Fatal("expected the export to fail for a gone transcript")
+	}
+	if !strings.Contains(runErr.Error(), "this session's transcript file no longer exists") {
+		t.Errorf("error = %q, want the gone-transcript message", runErr.Error())
+	}
+}
