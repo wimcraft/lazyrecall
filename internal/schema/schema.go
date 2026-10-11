@@ -131,7 +131,16 @@ import (
 // because NULL ("no custom name, show the source name or topic instead")
 // is already the correct value for every lineage that predates the
 // column.
-var CurrentVersion = 10
+//
+// v11 adds lineages.starred_at, the star the user puts on a session from
+// inside lazyrecall itself (like starring an email), storing when the star
+// was set as a Unix-seconds value. Like the custom name at v10, a star is
+// the user's own decision rather than anything read back out of a
+// transcript, so it belongs on the durable lineages table where it
+// survives an index rebuild and follows a continuation; NULL ("not
+// starred") is already the right value for every lineage that predates the
+// column, so this is another ALTER TABLE with no backfill.
+var CurrentVersion = 11
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -201,7 +210,8 @@ CREATE TABLE IF NOT EXISTS lineages (
 	handle      INTEGER,
 	archived_at INTEGER,
 	group_name  TEXT,
-	custom_name TEXT
+	custom_name TEXT,
+	starred_at  INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle ON lineages(handle);
 
@@ -302,6 +312,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle ON lineages(handle);
 	10: `
 ALTER TABLE lineages ADD COLUMN custom_name TEXT;
 `,
+	// v11 adds the star timestamp to the durable lineages table, exactly
+	// like custom_name did at v10 - ALTER TABLE, no backfill needed since
+	// NULL ("not starred") is already the right value for every lineage
+	// that predates the column.
+	11: `
+ALTER TABLE lineages ADD COLUMN starred_at INTEGER;
+`,
 }
 
 // annotationOnly marks a schema version whose migration touches only the
@@ -324,6 +341,7 @@ ALTER TABLE lineages ADD COLUMN custom_name TEXT;
 // migration actually changed.
 var annotationOnly = map[int]bool{
 	10: true,
+	11: true,
 }
 
 // Open ensures the database at r.DBPath exists with the current schema,
