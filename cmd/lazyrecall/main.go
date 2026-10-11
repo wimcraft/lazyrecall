@@ -804,11 +804,10 @@ func cmdNew(global *flag.FlagSet, args []string) error {
 		Templates:  cfg.Sources[source],
 		ProfileEnv: env,
 	})
-	fmt.Println(out.Message)
-	if out.Failed {
-		return errors.New(out.Message)
-	}
-	return nil
+	// Launch only returns on a failure path: the agent replaced this
+	// process otherwise. Returning the message as the error prints it once
+	// and makes the exit status non-zero.
+	return errors.New(out.Message)
 }
 
 // newSessionTarget resolves `new --agent` to exactly one install to launch.
