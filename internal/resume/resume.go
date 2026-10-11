@@ -170,32 +170,27 @@ type LaunchTarget struct {
 
 // launchCommand is the program and argument vector that starts a new
 // session: t.Templates.New, then the id, name, model and prompt templates
-// for whichever values are set, each element's placeholders replaced. Like
-// agentCommand the result is an argv vector, never a shell string -
-// substitution is strings.ReplaceAll per element so a value cannot become a
-// shell command no matter what it contains.
+// for whichever values are set. Like agentCommand the result is an argv
+// vector, never a shell string - substitution is strings.ReplaceAll per
+// element so a value cannot become a shell command no matter what it
+// contains. Each template only has its own placeholder replaced, and only
+// once, so a name or prompt that happens to contain "{prompt}" or "{id}"
+// reaches the agent as typed instead of being substituted a second time.
 func launchCommand(t LaunchTarget) (program string, argv []string) {
 	tpl := t.Templates
 	argv = append(argv, tpl.New...)
-	if t.ID != "" {
-		argv = append(argv, tpl.NewID...)
+	add := func(elems []string, placeholder, value string) {
+		if value == "" {
+			return
+		}
+		for _, el := range elems {
+			argv = append(argv, strings.ReplaceAll(el, placeholder, value))
+		}
 	}
-	if t.Name != "" {
-		argv = append(argv, tpl.NewName...)
-	}
-	if t.Model != "" {
-		argv = append(argv, tpl.Model...)
-	}
-	if t.Prompt != "" {
-		argv = append(argv, tpl.Prompt...)
-	}
-	for i, el := range argv {
-		el = strings.ReplaceAll(el, "{id}", t.ID)
-		el = strings.ReplaceAll(el, "{name}", t.Name)
-		el = strings.ReplaceAll(el, "{model}", t.Model)
-		el = strings.ReplaceAll(el, "{prompt}", t.Prompt)
-		argv[i] = el
-	}
+	add(tpl.NewID, "{id}", t.ID)
+	add(tpl.NewName, "{name}", t.Name)
+	add(tpl.Model, "{model}", t.Model)
+	add(tpl.Prompt, "{prompt}", t.Prompt)
 	return argv[0], argv
 }
 

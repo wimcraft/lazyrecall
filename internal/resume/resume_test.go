@@ -579,6 +579,31 @@ func TestLaunchPromptMetacharactersStayLiteralArgv(t *testing.T) {
 	}
 }
 
+// TestLaunchPlaceholderInAValueIsNotSubstitutedAgain covers a name or
+// prompt that itself contains a placeholder: each template replaces only
+// its own placeholder, once, so the text arrives exactly as typed.
+func TestLaunchPlaceholderInAValueIsNotSubstitutedAgain(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+	gotArgv := launchStub(t)
+
+	Launch(LaunchTarget{
+		Source: "claude", CWD: dir,
+		ID: "abc", Name: "about {prompt}", Prompt: "use {id} and {model}",
+		Templates: config.Source{
+			New:     []string{"claude"},
+			NewID:   []string{"--session-id", "{id}"},
+			NewName: []string{"--name", "{name}"},
+			Prompt:  []string{"{prompt}"},
+		},
+	})
+
+	want := []string{"claude", "--session-id", "abc", "--name", "about {prompt}", "use {id} and {model}"}
+	if !reflect.DeepEqual(*gotArgv, want) {
+		t.Errorf("argv = %q, want %q", *gotArgv, want)
+	}
+}
+
 // TestLaunchModelWithoutTemplateFailsBeforeExec covers the hard-failure
 // rule: asking for a model a source has no template for must fail without
 // starting the agent, not launch it silently on the default model. execAgent
