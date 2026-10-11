@@ -29,6 +29,14 @@ type Target struct {
 	RepoRootExists  *bool
 	Resumable       bool
 
+	// TranscriptGone is true when the session recorded a transcript file
+	// (search.Item.TranscriptPath) and that file no longer exists on disk -
+	// normally the agent's own retention cleanup. There is nothing left for
+	// the agent to resume, so Resume must explain that instead of starting
+	// an agent that would only fail with a message saying nothing about why
+	// (internal/search: TranscriptGone).
+	TranscriptGone bool
+
 	// Resume is the already-resolved argv template this session's source
 	// uses to resume a session, with "{id}" standing in for the session id
 	// (internal/config: a source's Resume). It is resolved by the caller
@@ -106,6 +114,13 @@ type Outcome struct {
 	// longer exists.
 	DirectoryMissing bool
 
+	// TranscriptGone is true when the session's transcript file was
+	// recorded but no longer exists, so the agent has nothing to resume.
+	// Reported before program resolution or any working-directory change:
+	// the failure belongs to the session's own history, not to the machine
+	// the agent is installed on.
+	TranscriptGone bool
+
 	// AlternativeOffered is the repository root offered in place of a
 	// missing working directory, when it still exists. Never a substitute
 	// directory LazyRecall picked on its own - only ever this session's own
@@ -142,6 +157,13 @@ func Resume(t Target) Outcome {
 		return Outcome{
 			NotResumable: true,
 			Message:      "This session has no recorded working directory and cannot be resumed.",
+		}
+	}
+
+	if t.TranscriptGone {
+		return Outcome{
+			TranscriptGone: true,
+			Message:        "This session's transcript file no longer exists, so its agent cannot resume it. It was most likely removed by the agent's own cleanup (for Claude Code, cleanupPeriodDays in settings.json).",
 		}
 	}
 
