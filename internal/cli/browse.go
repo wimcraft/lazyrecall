@@ -396,6 +396,17 @@ type browseModel struct {
 
 	focus panelID
 
+	// zoomed is whether `z` has given the whole body to the detail pane
+	// (change zoom-detail). Reading a long transcript is otherwise a
+	// negotiation with five panels sharing the frame, so while it is set the
+	// geometry returns the detail pane alone and handleBrowseKey admits only
+	// the keys that pane answers. zoomPrevFocus is the panel focus goes back
+	// to when the zoom is left, by `z` or Esc - the zoom is a temporary
+	// view, not a focus move, and leaving it must not strand the cursor in
+	// the pane the user was only reading.
+	zoomed        bool
+	zoomPrevFocus panelID
+
 	// showAll disables the hide rules and the archive flag together, because
 	// they are one question to the user: "show me everything". hide is the
 	// standing config rules, passed through to the same search.Filter the
@@ -1044,7 +1055,14 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the width collapse is the only way a panel can disappear now.)
 		// Sessions is always panelDrawn (defect 2 of the same audit), so
 		// this reassignment can never itself need a further fallback.
-		if !m.panelDrawn(m.focus) {
+		//
+		// A zoom is exempt: it owns focus (the detail pane is the only
+		// panel on screen), and at the one-row body height where geometry
+		// gives even the detail pane nothing, the fallback would move focus
+		// behind the zoomed pane - unzoom restores zoomPrevFocus, so
+		// leaving focus where it is costs nothing and keeps the zoom
+		// coherent while it lasts.
+		if !m.zoomed && !m.panelDrawn(m.focus) {
 			m.focus = panelSessions
 		}
 		return m, nil
@@ -1085,6 +1103,9 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Alt {
 		return m, nil
+	}
+	if m.zoomed {
+		return m.handleZoomedKey(msg)
 	}
 
 	switch msg.Type {
@@ -1190,10 +1211,108 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleArchive()
 	case "*":
 		m.toggleStar()
+	case "z":
+		m.toggleZoom()
 	case ".":
 		m.toggleShowAll()
 	}
 	return m, nil
+}
+
+// handleZoomedKey is handleBrowseKey's whole repertoire while the detail
+// pane fills the frame: the keys that pane answers with it focused, plus
+// the two that leave the zoom, and nothing else.
+//
+// The narrowing is deliberate rather than incidental. A zoomed frame draws
+// no session list, no facet and no footer worth reading a filter's effect
+// off, so a key that changed one of them would be acting on something the
+// user cannot see - `1` moving a cursor behind the pane, Enter quitting
+// into a session they can no longer confirm is the selected one, `/`
+// filtering a list that is not on screen. Refusing them all is why the
+// zoom is worth having: the pane is the frame, and only its own keys reach
+// it.
+func (m *browseModel) handleZoomedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.selectedOK = false
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.unzoom()
+		return m, nil
+	case tea.KeyUp:
+		m.move(-1)
+		return m, nil
+	case tea.KeyDown:
+		m.move(1)
+		return m, nil
+	case tea.KeyCtrlU:
+		m.move(-m.halfScreen())
+		return m, nil
+	case tea.KeyCtrlD:
+		m.move(m.halfScreen())
+		return m, nil
+	case tea.KeyRunes:
+	default:
+		return m, nil
+	}
+
+	switch string(msg.Runes) {
+	case "j":
+		m.move(1)
+	case "k":
+		m.move(-1)
+	case "g":
+		m.moveTo(0)
+	case "G":
+		m.moveTo(1 << 30)
+	case "[":
+		m.cycleTab(-1)
+	case "]":
+		m.cycleTab(1)
+	case "n":
+		m.jumpToHit(1)
+	case "N":
+		m.jumpToHit(-1)
+	case "t":
+		m.toggleTranscriptMode()
+	case "?":
+		m.help = true
+	case "q":
+		m.selectedOK = false
+		return m, tea.Quit
+	case "z":
+		m.unzoom()
+	}
+	return m, nil
+}
+
+// toggleZoom is `z`: with a session selected it gives the detail pane the
+// whole frame and puts focus there, remembering where it came from; a
+// second `z` (unzoom) puts the layout back. With nothing selected there is
+// no pane to zoom into - the detail pane would only say "No session
+// selected." - so the key does nothing rather than filling the frame with
+// an empty box.
+func (m *browseModel) toggleZoom() {
+	if m.zoomed {
+		m.unzoom()
+		return
+	}
+	if m.current() == nil {
+		return
+	}
+	m.zoomPrevFocus = m.focus
+	m.zoomed = true
+	m.focus = panelDetail
+	m.notice = ""
+}
+
+// unzoom leaves the zoomed layout and restores the focus it interrupted
+// (zoomPrevFocus). Esc while zoomed reaches here too - unzooming is the one
+// meaning Esc can have in a frame with no other panel to clear - so the two
+// keys that advertise "or back" both land in the same place.
+func (m *browseModel) unzoom() {
+	m.zoomed = false
+	m.focus = m.zoomPrevFocus
 }
 
 // panelDrawn reports whether p occupies space in the layout for the focus
@@ -2332,6 +2451,20 @@ func (m browseModel) geometry() geometry {
 		g.bodyHeight = 0
 	}
 
+	// Zoomed: the detail pane is the whole frame (change zoom-detail). Every
+	// other height stays zero so stackPanels drops those panels and only
+	// detailPanel is drawn; sidebar is false because there is no second
+	// column to join, and the pane takes the full width rather than the
+	// right column's share of it. detailInner follows the same
+	// height-minus-two-border rule the unzoomed layout applies below, so a
+	// resize while zoomed adjusts the viewport exactly as it does otherwise.
+	if m.zoomed {
+		g.rightWidth = m.width
+		g.detailH = g.bodyHeight
+		g.detailInner = maxInt(g.detailH-2, 0)
+		return g
+	}
+
 	g.sidebar = m.width >= minSidebarWidth
 	if g.sidebar {
 		g.leftWidth = m.width * 3 / 10
@@ -2612,7 +2745,14 @@ func (m browseModel) View() string {
 	g := m.geometry()
 
 	var body string
-	if g.sidebar {
+	switch {
+	case m.zoomed:
+		// The detail pane alone fills the body when zoomed (change
+		// zoom-detail): stackPanels over the one box that geometry gave a
+		// height to, rendered the same way every other branch renders a
+		// panel, so the menu overlay/input/footer code below is untouched.
+		body = stackPanels(m.detailPanel(g))
+	case g.sidebar:
 		left := stackPanels(
 			m.facetPanel(panelGroups, &m.groups_, g.leftWidth, g.groupsH, m.group),
 			m.facetPanel(panelAgents, &m.agents, g.leftWidth, g.agentsH, m.agents.Sel),
@@ -2620,7 +2760,7 @@ func (m browseModel) View() string {
 			m.facetPanel(panelTags, &m.tags, g.leftWidth, g.tagsH, m.tags.Sel),
 		)
 		body = joinColumns(left, stackPanels(m.sessionsPanel(g), m.detailPanel(g)))
-	} else {
+	default:
 		// Too narrow for two columns: the same panels, stacked into one,
 		// at full width (change stack-panels-when-narrow). Nothing is
 		// dropped - narrowHeights collapses the ones the user is not in.
@@ -3270,6 +3410,7 @@ var browseActions = []browseAction{
 	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
 	{key: "n/N", label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
 	{key: "t", label: "clean/full", help: "on the Transcript tab, toggle between the clean question/answer view and the full technical transcript", panels: []panelID{panelSessions, panelDetail}},
+	{key: "z", label: "zoom", help: "zoom the detail pane to the whole frame, or back (esc also leaves)", panels: []panelID{panelSessions, panelDetail}, footer: true},
 	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
 	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
 	{key: "x", label: "menu", help: "action menu for the focused panel - j/k or ↑/↓ move, enter applies, esc closes, / narrows by typing", footer: true},
