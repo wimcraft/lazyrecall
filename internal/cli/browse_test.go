@@ -1730,6 +1730,31 @@ func TestHelpOverlayClosesOnAnyKey(t *testing.T) {
 	}
 }
 
+// The help overlay names the build it is running in: `lazyrecall version`
+// prints one, but a browser session had no way to say which build was up
+// (change version-in-help). With no version - the zero value, and every
+// other test model here - the title is exactly what it always was.
+func TestHelpOverlayNamesTheRunningBuild(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		Version:  "1.2.3",
+		Installs: testInstalls("claude-personal"),
+	})
+	first := strings.SplitN(m.helpView(), "\n", 2)[0]
+	if !strings.Contains(first, "lazyrecall 1.2.3 - key bindings") {
+		t.Errorf("help title %q does not name the build", first)
+	}
+
+	plain := newTestBrowser(db, "claude-personal", BrowserOptions{
+		Installs: testInstalls("claude-personal"),
+	})
+	firstPlain := strings.SplitN(plain.helpView(), "\n", 2)[0]
+	if firstPlain != "lazyrecall - key bindings" {
+		t.Errorf("help title without a version = %q, want %q", firstPlain, "lazyrecall - key bindings")
+	}
+}
+
 // The browser must never bind an Alt combination: the window manager
 // reserves them, so they would never reach the program (spec session-search,
 // "The browser binds no Alt combinations").
