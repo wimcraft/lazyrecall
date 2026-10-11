@@ -41,6 +41,7 @@ type jsonItem struct {
 	MessageCount   *int64   `json:"message_count,omitempty"`
 	Resumable      bool     `json:"resumable"`
 	Archived       bool     `json:"archived,omitempty"`
+	Starred        bool     `json:"starred,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	CommentCount   int      `json:"comment_count,omitempty"`
 	MatchSnippet   string   `json:"match_snippet,omitempty"`
@@ -54,7 +55,7 @@ func toJSONItem(it search.Item) jsonItem {
 		Origin:    string(it.Origin),
 		Client:    it.Client,
 		DirExists: it.DirExists, TranscriptGone: it.TranscriptGone, MessageCount: it.MessageCount, Resumable: it.Resumable,
-		Archived: it.Archived, Tags: it.Tags, CommentCount: it.CommentCount, MatchSnippet: it.MatchSnippet,
+		Archived: it.Archived, Starred: it.Starred, Tags: it.Tags, CommentCount: it.CommentCount, MatchSnippet: it.MatchSnippet,
 	}
 	if it.StartedAt != nil {
 		s := it.StartedAt.Format(time.RFC3339)

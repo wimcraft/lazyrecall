@@ -131,6 +131,27 @@ func TestWriteItemsJSONIncludesTranscriptGone(t *testing.T) {
 	}
 }
 
+// A star set from inside lazyrecall is part of what a script reading --json
+// needs to find a session again, so it is carried like the archived flag
+// and omitted, like it, when the session is not starred.
+func TestWriteItemsJSONIncludesStarred(t *testing.T) {
+	items := []search.Item{
+		{SessionID: "claude:p:1", EndState: "completed", Starred: true},
+		{SessionID: "claude:p:2", EndState: "completed"},
+	}
+	var buf bytes.Buffer
+	if err := WriteItemsJSON(&buf, items); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"starred": true`) {
+		t.Errorf("expected starred in output, got:\n%s", out)
+	}
+	if strings.Count(out, `"starred"`) != 1 {
+		t.Errorf("expected starred omitted for the unstarred session, got:\n%s", out)
+	}
+}
+
 func TestWriteItemsHumanShowsEmptyMessage(t *testing.T) {
 	var buf bytes.Buffer
 	WriteItemsHuman(&buf, nil, "nothing here", DefaultRenderOptions)

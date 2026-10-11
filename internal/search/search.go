@@ -54,9 +54,11 @@ type Filter struct {
 	// Group narrows to one view of a session's effective group (change
 	// group-sessions-in-one-index): "" is All (non-archived, hide rules as
 	// usual), "archive" is every archived session regardless of group,
-	// "unknown" is every non-archived session with no effective group, and
-	// any other value must name a group in Groups below - validate with
-	// ValidateGroup before setting this from user input.
+	// "unknown" is every non-archived session with no effective group,
+	// "starred" is every non-archived starred session regardless of group
+	// (the star annotate.SetStarred records), and any other value must name
+	// a group in Groups below - validate with ValidateGroup before setting
+	// this from user input.
 	Group string
 	// Groups is the configured groups a session's effective group is
 	// computed against (config.Config.Groups) - needed on every query that
@@ -149,6 +151,14 @@ type Item struct {
 	// machine-readable output.
 	Archived bool
 
+	// Starred is true when the user starred the session, the marker
+	// annotate.SetStarred stores. Like Archived it lives on lineages, so it
+	// survives a full index rebuild, and like Archived it is carried on the
+	// machine-readable output. A star is orthogonal to archiving: a session
+	// can be both, and the reserved "starred" group view lists the starred
+	// ones that are not archived, whatever group they otherwise belong to.
+	Starred bool
+
 	// Group is this session's effective group (change
 	// group-sessions-in-one-index): the lineage's manual override, else the
 	// configured group whose path is the longest prefix of CWD, else "" -
@@ -196,7 +206,7 @@ const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
 	s.started_at, s.last_activity_at, s.topic, s.name, l.custom_name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.source_session_id, s.resumable,
-	l.archived_at IS NOT NULL AS archived, s.install, l.group_name IS NOT NULL AS group_manual,
+	l.archived_at IS NOT NULL AS archived, l.starred_at IS NOT NULL AS starred, s.install, l.group_name IS NOT NULL AS group_manual,
 	(SELECT COUNT(*) FROM comments WHERE comments.lineage_id = s.lineage_id) AS comment_count`
 
 type itemRow struct {
@@ -223,6 +233,7 @@ type itemRow struct {
 	SourceSessionID string  `json:"source_session_id"`
 	Resumable       int64   `json:"resumable"`
 	Archived        int64   `json:"archived"`
+	Starred         int64   `json:"starred"`
 	Install         *string `json:"install"`
 	GroupManual     int64   `json:"group_manual"`
 	CommentCount    int64   `json:"comment_count"`
@@ -261,6 +272,7 @@ func (row itemRow) toItem() Item {
 		SourceSessionID: row.SourceSessionID,
 		Resumable:       row.Resumable != 0,
 		Archived:        row.Archived != 0,
+		Starred:         row.Starred != 0,
 		GroupManual:     row.GroupManual != 0,
 		CommentCount:    int(row.CommentCount),
 	}
@@ -354,6 +366,8 @@ func baseClausesFromFilter(f Filter, params map[string]any) []string {
 		clauses = append(clauses, "group_archive")
 	case "unknown":
 		clauses = append(clauses, "group_unknown")
+	case "starred":
+		clauses = append(clauses, "group_starred")
 	default:
 		params["group"] = f.Group
 		clauses = append(clauses, "group_named")
@@ -427,6 +441,11 @@ func buildPredicate(pf *sqlitex.ParamFile, clauses []string, groupExpr string) s
 			parts = append(parts, groupExpr+" = "+pf.Ref("group"))
 		case "group_archive":
 			parts = append(parts, "l.archived_at IS NOT NULL")
+		case "group_starred":
+			// The reserved "starred" view: every non-archived starred
+			// session, whatever group it otherwise belongs to - the same
+			// shape as "archive", which also ignores the effective group.
+			parts = append(parts, "l.starred_at IS NOT NULL")
 		case "group_unknown":
 			parts = append(parts, groupExpr+" IS NULL")
 		case "client":
