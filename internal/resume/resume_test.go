@@ -48,6 +48,33 @@ func TestResumeMissingDirectoryNoAlternative(t *testing.T) {
 	}
 }
 
+// TestResumeRefusesWhenTranscriptGone covers Claude Code's cleanupPeriodDays
+// case at the resume end: the index still lists the session, but the
+// transcript file the agent would read is gone, so starting `claude
+// --resume` would only fail inside Claude with "No conversation found with
+// session ID: ...". Resume must return before the program lookup (the
+// template names a program that does not exist, and PATH is empty, so a
+// lookup would fail with Failed - proving none happened).
+func TestResumeRefusesWhenTranscriptGone(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	out := Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true,
+		CWD: strp(t.TempDir()), TranscriptGone: true,
+		Resume: []string{"no-such-agent-lazyrecall-test", "--resume", "{id}"},
+	})
+	if !out.TranscriptGone {
+		t.Fatalf("expected TranscriptGone, got %+v", out)
+	}
+	want := "This session's transcript file no longer exists, so its agent cannot resume it. It was most likely removed by the agent's own cleanup (for Claude Code, cleanupPeriodDays in settings.json)."
+	if out.Message != want {
+		t.Errorf("message = %q, want %q", out.Message, want)
+	}
+	if out.Failed {
+		t.Errorf("expected no failure from program resolution, got %+v", out)
+	}
+}
+
 // TestResumeReportsMissingAgentProgram covers spec session-resume, "The
 // agent's own program is not installed": PATH is pointed at an empty
 // directory, so exec.LookPath cannot find "claude" no matter what is
