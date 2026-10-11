@@ -222,6 +222,105 @@ func TestGroupsCommandOutput(t *testing.T) {
 	}
 }
 
+// hasLine reports whether out contains a line beginning with prefix - a
+// whole-line test, so a substring of an unrelated path or install name
+// cannot be mistaken for the line under test.
+func hasLine(out, prefix string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGroupsCommandStarredLine covers the reserved "starred" view in the
+// `groups` command: a non-archived starred session adds a `starred N` line
+// after `archive` (same shape as `unknown` - printed only when nonzero),
+// since `starred` names a view the browser and --group=starred already
+// offer and the CLI must not stay silent about it. The JSON envelope
+// carries `"starred"` always, zero included, so a machine reader sees the
+// field regardless of whether anything is starred.
+func TestGroupsCommandStarredLine(t *testing.T) {
+	t.Run("with a starred session", func(t *testing.T) {
+		install, db := setupGroupTestEnv(t, "[groups.work]\npaths = [\"/code\"]\n")
+		b := db.NewBatch()
+		if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "starred_at"}, []map[string]any{
+			{"id": "lin-starred", "profile": "p", "orphaned": 0, "starred_at": 1000},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "cwd", "install"}, []map[string]any{
+			{"id": "claude:" + install + ":starred", "source": "claude", "source_session_id": "starred", "lineage_id": "lin-starred", "end_state": "completed", "resumable": 1, "cwd": "/code/proj", "install": install},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		out, runErr := runCaptured(t, []string{"groups", "--no-refresh"})
+		if runErr != nil {
+			t.Fatalf("run(groups --no-refresh): %v", runErr)
+		}
+		if !strings.Contains(out, "starred 1") {
+			t.Errorf("expected a starred count line, got:\n%s", out)
+		}
+		if !strings.Contains(out, "work (/code): 1") {
+			t.Errorf("expected the starred session to still count in its group, got:\n%s", out)
+		}
+
+		jsonOut, runErr := runCaptured(t, []string{"groups", "--no-refresh", "--json"})
+		if runErr != nil {
+			t.Fatalf("run(groups --json): %v", runErr)
+		}
+		var envelope struct {
+			Starred *int `json:"starred"`
+		}
+		if err := json.Unmarshal([]byte(jsonOut), &envelope); err != nil {
+			t.Fatalf("unmarshalling JSON output %q: %v", jsonOut, err)
+		}
+		if envelope.Starred == nil || *envelope.Starred != 1 {
+			t.Errorf("JSON starred = %v, want 1 in:\n%s", envelope.Starred, jsonOut)
+		}
+	})
+
+	t.Run("without a starred session", func(t *testing.T) {
+		install, db := setupGroupTestEnv(t, "[groups.work]\npaths = [\"/code\"]\n")
+		b := db.NewBatch()
+		if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "cwd", "install"}, []map[string]any{
+			{"id": "claude:" + install + ":plain", "source": "claude", "source_session_id": "plain", "lineage_id": "lin-plain", "end_state": "completed", "resumable": 1, "cwd": "/code/proj", "install": install},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		out, runErr := runCaptured(t, []string{"groups", "--no-refresh"})
+		if runErr != nil {
+			t.Fatalf("run(groups --no-refresh): %v", runErr)
+		}
+		if hasLine(out, "starred ") {
+			t.Errorf("expected no starred line when nothing is starred, got:\n%s", out)
+		}
+
+		jsonOut, runErr := runCaptured(t, []string{"groups", "--no-refresh", "--json"})
+		if runErr != nil {
+			t.Fatalf("run(groups --json): %v", runErr)
+		}
+		var envelope struct {
+			Starred *int `json:"starred"`
+		}
+		if err := json.Unmarshal([]byte(jsonOut), &envelope); err != nil {
+			t.Fatalf("unmarshalling JSON output %q: %v", jsonOut, err)
+		}
+		if envelope.Starred == nil || *envelope.Starred != 0 {
+			t.Errorf("JSON starred = %v, want 0 present in:\n%s", envelope.Starred, jsonOut)
+		}
+	})
+}
+
 // TestVersionFlagReportsBuildIdentity covers the diagnostic this change
 // adds (fix-herdr-resume-delegation): `-v`, `--version`, and `version`
 // must all report a build identifier, so that when a bug report and the

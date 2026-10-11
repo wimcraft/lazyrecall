@@ -184,6 +184,11 @@ type GroupCounts struct {
 	// Unknown counts non-archived sessions whose effective group is NULL:
 	// no manual override and no configured path claims them.
 	Unknown int
+	// Starred counts non-archived starred sessions, whatever their group -
+	// i.e. what --group=starred lists. A starred session is also counted in
+	// its own group (and in Unknown if it has none), so Starred overlaps the
+	// other counts rather than partitioning the corpus alongside them.
+	Starred int
 }
 
 // facetSupersetClauses builds the clause set ListForFacets and
@@ -249,11 +254,12 @@ ORDER BY s.last_activity_at DESC;`, itemColumns, groupExpr, itemFrom, predicate)
 }
 
 // Counts computes GroupCounts in one query: one COUNT(*) grouped by a
-// session's effective group and its archive state, since effectiveGroupExpr
-// is the same expression that classifies every row everywhere else. hide
-// carries the standing hide rules (not ShowAll - a count is meaningless
-// without knowing which rules it honors, so Counts always applies them,
-// matching what a plain `list`/`browse` with no --all would show).
+// session's effective group, its archive state and its starred state, since
+// effectiveGroupExpr is the same expression that classifies every row
+// everywhere else. hide carries the standing hide rules (not ShowAll - a
+// count is meaningless without knowing which rules it honors, so Counts
+// always applies them, matching what a plain `list`/`browse` with no --all
+// would show).
 func Counts(db *sqlitex.Runner, hide config.Hide, groups []config.Group) (GroupCounts, error) {
 	params := map[string]any{}
 	branches := effectiveGroupParams(params, groups)
@@ -267,14 +273,15 @@ func Counts(db *sqlitex.Runner, hide config.Hide, groups []config.Group) (GroupC
 	groupExpr := effectiveGroupExpr(pf, branches)
 	predicate := buildPredicate(pf, clauses, groupExpr)
 	q := fmt.Sprintf(`
-SELECT %s AS grp, l.archived_at IS NOT NULL AS is_archived, COUNT(*) AS n
+SELECT %s AS grp, l.archived_at IS NOT NULL AS is_archived, l.starred_at IS NOT NULL AS is_starred, COUNT(*) AS n
 FROM %s
 WHERE %s
-GROUP BY grp, is_archived;`, groupExpr, itemFrom, predicate)
+GROUP BY grp, is_archived, is_starred;`, groupExpr, itemFrom, predicate)
 
 	var rows []struct {
 		Grp        *string `json:"grp"`
 		IsArchived int64   `json:"is_archived"`
+		IsStarred  int64   `json:"is_starred"`
 		N          int     `json:"n"`
 	}
 	if err := db.Query(q, &rows); err != nil {
@@ -286,10 +293,15 @@ GROUP BY grp, is_archived;`, groupExpr, itemFrom, predicate)
 		switch {
 		case r.IsArchived != 0:
 			out.Archive += r.N
-		case r.Grp == nil:
-			out.Unknown += r.N
 		default:
-			out.ByGroup[*r.Grp] += r.N
+			if r.Grp == nil {
+				out.Unknown += r.N
+			} else {
+				out.ByGroup[*r.Grp] += r.N
+			}
+		}
+		if r.IsArchived == 0 && r.IsStarred != 0 {
+			out.Starred += r.N
 		}
 	}
 	return out, nil

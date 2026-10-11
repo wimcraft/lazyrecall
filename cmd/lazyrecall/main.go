@@ -1129,6 +1129,9 @@ func writeGroupsHuman(cfg config.Config, counts search.GroupCounts, installs []p
 		fmt.Printf("%s (%s): %d\n", g.Name, strings.Join(g.Paths, ", "), counts.ByGroup[g.Name])
 	}
 	fmt.Printf("archive %d\n", counts.Archive)
+	if counts.Starred > 0 {
+		fmt.Printf("starred %d\n", counts.Starred)
+	}
 	if counts.Unknown > 0 {
 		fmt.Printf("unknown %d\n", counts.Unknown)
 	}
@@ -1165,9 +1168,10 @@ func writeGroupsJSON(cfg config.Config, counts search.GroupCounts, installs []pr
 	out := struct {
 		Groups   []groupOut   `json:"groups"`
 		Archive  int          `json:"archive"`
+		Starred  int          `json:"starred"`
 		Unknown  int          `json:"unknown"`
 		Installs []installOut `json:"installs"`
-	}{Groups: groups, Archive: counts.Archive, Unknown: counts.Unknown, Installs: outInstalls}
+	}{Groups: groups, Archive: counts.Archive, Starred: counts.Starred, Unknown: counts.Unknown, Installs: outInstalls}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
