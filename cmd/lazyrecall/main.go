@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/wimcraft/lazyrecall/internal/annotate"
 	"github.com/wimcraft/lazyrecall/internal/cli"
 	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/doctor"
 	"github.com/wimcraft/lazyrecall/internal/profile"
 	"github.com/wimcraft/lazyrecall/internal/refresh"
 	"github.com/wimcraft/lazyrecall/internal/resume"
@@ -100,6 +102,8 @@ func run(args []string) error {
 		return cmdName(global, noRefresh, rest)
 	case "refresh":
 		return cmdRefresh(global, rest)
+	case "doctor":
+		return cmdDoctor(global, rest)
 	case "groups":
 		return cmdGroups(global, jsonFlag, noRefresh, rest)
 	case "config":
@@ -134,6 +138,7 @@ Usage:
   lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
   lazyrecall name      SESSION_ID TEXT... | SESSION_ID --clear
   lazyrecall refresh   [--full]
+  lazyrecall doctor
   lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
   lazyrecall groups    [--json]
   lazyrecall config    path|init|show
@@ -933,6 +938,38 @@ func cmdName(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	} else {
 		fmt.Printf("%s -> %s\n", rest[0], name)
 	}
+	return nil
+}
+
+// cmdDoctor implements `lazyrecall doctor`: a read-only health report over
+// every discovered install (internal/doctor) - the program each one resumes
+// with and whether it is on PATH, its session and lost-transcript counts, and
+// Claude Code's cleanupPeriodDays. It takes no flags of its own and always
+// exits zero: doctor reports what it finds, it does not decide whether any of
+// it is a failure. The index is opened without a refresh on purpose - doctor
+// must be safe to run when something is already wrong, and refreshing would
+// change the thing being examined.
+func cmdDoctor(global *flag.FlagSet, args []string) error {
+	if err := global.Parse(args); err != nil {
+		return err
+	}
+	installs, err := profile.Discover()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openDB(true, false)
+	if err != nil {
+		return err
+	}
+	rep, err := doctor.Run(installs, cfg, db, exec.LookPath)
+	if err != nil {
+		return err
+	}
+	doctor.Render(os.Stdout, rep)
 	return nil
 }
 
