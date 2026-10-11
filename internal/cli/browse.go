@@ -3312,6 +3312,13 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, groups []config.Group,
 		fmt.Fprintf(&b, "branch: %s\n", *it.GitBranch)
 	}
 	fmt.Fprintf(&b, "state:  %s\n", style(string(it.EndState), stateColor(it.EndState), opts.Style))
+	// The end state above still says how the conversation finished; this
+	// line says why the session cannot be carried on from here, so the
+	// dimmed state slot in the row ("[gone]") is explained on the one
+	// surface with room to explain it.
+	if it.TranscriptGone {
+		fmt.Fprintf(&b, "transcript: %s\n", style("gone - removed by the agent's cleanup; this session cannot be resumed", ansiDim, opts.Style))
+	}
 	if it.LastActivityAt != nil {
 		active := fmt.Sprintf("%s (%s)", it.LastActivityAt.Format(time.RFC3339), relativeTime(*it.LastActivityAt))
 		fmt.Fprintf(&b, "active: %s\n", style(active, ansiDim, opts.Style))

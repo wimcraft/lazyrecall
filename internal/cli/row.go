@@ -203,6 +203,15 @@ func sourceSlotText(it search.Item, labels map[string]string) string {
 // it, not the glyph's colour alone, is what a NO_COLOR user reads.
 const commentMarkerGlyph = "✎"
 
+// goneStateSlotText is what the state slot reads for a session whose
+// transcript file has been removed by the agent's own retention cleanup
+// (search.Item.TranscriptGone): the recorded end state describes how the
+// conversation finished, but the file that end state was read from, and
+// that resuming needs, no longer exists - so the row says what is actually
+// true now rather than repeating a state that is no longer resumable. The
+// same fact, spelled out, is on the Detail tab (renderItemDetail).
+const goneStateSlotText = "[gone]"
+
 func rowSlots(it search.Item, labels map[string]string) []string {
 	slots := make([]string, numSlots)
 
@@ -227,6 +236,9 @@ func rowSlots(it search.Item, labels map[string]string) []string {
 	}
 
 	slots[slotState] = "[" + string(it.EndState) + "]"
+	if it.TranscriptGone {
+		slots[slotState] = goneStateSlotText
+	}
 
 	if text := rowText(it); text != "" {
 		slots[slotTopic] = `"` + text + `"`
@@ -585,7 +597,19 @@ func handleColor(it search.Item, groupColors map[string]string) string {
 // built-in colour scheme (design.md non-goal: no theming/configuration) -
 // except for the handle, whose color is handleColor's (change per-group-
 // colors, archive-unknown-colors).
+//
+// A session whose transcript is gone is dimmed across the whole row - the
+// check comes before the switch so it overrides every per-slot color,
+// including the topic's italic-or-bold and the end-state slot's
+// attention/completed colors, which would otherwise say a session is worth
+// reading or can still be resumed when its file no longer exists. The
+// handle is the one exception: it keeps handleColor, so a group's own color
+// (the thing that says which project a row belongs to) stays readable, and
+// a dimmed row is still identifiable at a glance.
 func slotColor(idx int, it search.Item, groupColors map[string]string) string {
+	if it.TranscriptGone && idx != slotHandle {
+		return ansiDim
+	}
 	switch idx {
 	case slotHandle:
 		return handleColor(it, groupColors)

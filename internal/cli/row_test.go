@@ -878,3 +878,72 @@ func TestRenderRowHandleArchiveUnknownPrecedence(t *testing.T) {
 		t.Errorf("archived with no archive color: expected the group color to apply, got %q", line)
 	}
 }
+
+// TestRenderRowGoneSessionShowsGoneState covers the row half of the
+// "gone sessions stay visible but dimmed" decision: a session whose
+// transcript file the agent's own cleanup removed (search.Item.
+// TranscriptGone) keeps its place in the list - it is still listed, still
+// selectable, still shows where and when it ran - but its state slot says
+// "[gone]" instead of the recorded end state, which would otherwise promise
+// a conversation that can no longer be resumed. The whole row is dimmed,
+// except the handle, which keeps its group color so a row still says which
+// project it belongs to (slotColor).
+func TestRenderRowGoneSessionShowsGoneState(t *testing.T) {
+	cwd := "/Users/example/project"
+	present := search.Item{SessionID: "claude:p", Source: "claude", Handle: 904, CWD: &cwd,
+		EndState: "completed", Topic: strp("a session that is still on disk"), Group: "work"}
+	gone := present
+	gone.TranscriptGone = true
+
+	goneLine := RenderRow(gone, RenderOptions{Width: 80, Style: false})
+	presentLine := RenderRow(present, RenderOptions{Width: 80, Style: false})
+
+	if !strings.Contains(goneLine, goneStateSlotText) {
+		t.Errorf("a gone session's row should say %s, got %q", goneStateSlotText, goneLine)
+	}
+	for _, bracket := range []string{"[completed]", "[dangling]", "[abandoned]", "[" + string(gone.EndState) + "]"} {
+		if strings.Contains(goneLine, bracket) {
+			t.Errorf("a gone session's row should not repeat an end state (%s), got %q", bracket, goneLine)
+		}
+	}
+	if strings.Contains(presentLine, goneStateSlotText) {
+		t.Errorf("a session with its transcript still on disk should not say %s, got %q", goneStateSlotText, presentLine)
+	}
+	if !strings.Contains(presentLine, "["+string(present.EndState)+"]") {
+		t.Errorf("a session with its transcript still on disk should show its end state, got %q", presentLine)
+	}
+
+	// The gone row is dimmed, but the handle keeps its group color so the
+	// row is still identifiable as part of its project.
+	goneStyled := RenderRow(gone, RenderOptions{Width: 80, Style: true, GroupColors: map[string]string{"work": "\x1b[34m"}})
+	presentStyled := RenderRow(present, RenderOptions{Width: 80, Style: true, GroupColors: map[string]string{"work": "\x1b[34m"}})
+	if !strings.Contains(goneStyled, ansiDim) {
+		t.Errorf("a gone session's row should be dimmed, got %q", goneStyled)
+	}
+	if !strings.Contains(goneStyled, "\x1b[34m#904") {
+		t.Errorf("a gone session's handle should keep its group color, got %q", goneStyled)
+	}
+	if strings.Contains(presentStyled, ansiDim+"#904") {
+		t.Errorf("a session with its transcript still on disk should keep its normal handle styling, got %q", presentStyled)
+	}
+
+	// The topic is dimmed rather than italic-or-bold: the row must not look
+	// like ordinary readable content.
+	if strings.Contains(goneStyled, ansiItalic) || strings.Contains(goneStyled, ansiBold+`"`) {
+		t.Errorf("a gone session's topic should be dim, not italic or bold, got %q", goneStyled)
+	}
+
+	// The one-line width invariant holds for the gone row too, the same
+	// fixture TestRenderRowFitsWidth uses.
+	long := longItem()
+	long.TranscriptGone = true
+	for _, width := range []int{120, 80, 60, 40, 30} {
+		line := RenderRow(long, RenderOptions{Width: width, Style: false})
+		if got := runewidth.StringWidth(line); got > width {
+			t.Errorf("width %d: gone row is %d display columns wide: %q", width, got, line)
+		}
+		if strings.Contains(line, "\n") {
+			t.Errorf("width %d: gone row must never contain a newline: %q", width, line)
+		}
+	}
+}
