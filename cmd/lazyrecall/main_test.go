@@ -1012,6 +1012,146 @@ func TestNameCommandUnresolvedIdentifierErrors(t *testing.T) {
 	}
 }
 
+// TestStarCommandRoundTrip covers `lazyrecall star SESSION_ID`, `lazyrecall
+// star list` and `lazyrecall star SESSION_ID --clear` end to end (change
+// star-sessions): resolving the short handle, writing lineages.starred_at
+// through annotate.SetStarred exactly as annotate's own unit tests
+// establish, listing the starred session through the same row path `list`
+// uses, and clearing it again.
+func TestStarCommandRoundTrip(t *testing.T) {
+	install, db := setupGroupTestEnv(t, "")
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "handle"}, []map[string]any{
+		{"id": "lin1", "profile": install, "orphaned": 0, "handle": 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "origin"}, []map[string]any{
+		{"id": "claude:" + install + ":s1", "source": "claude", "source_session_id": "s1", "lineage_id": "lin1", "end_state": "completed", "resumable": 1, "origin": "interactive"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	readStarredAt := func() *int64 {
+		t.Helper()
+		var rows []struct {
+			StarredAt *int64 `json:"starred_at"`
+		}
+		if err := db.Query("SELECT starred_at FROM lineages WHERE id = 'lin1';", &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected exactly one lineage row, got %d", len(rows))
+		}
+		return rows[0].StarredAt
+	}
+
+	out, runErr := runCaptured(t, []string{"star", "--no-refresh", "5"})
+	if runErr != nil {
+		t.Fatalf("run(star 5): %v", runErr)
+	}
+	if !strings.Contains(out, "5") || !strings.Contains(out, "starred") {
+		t.Errorf("expected the command to print what was set, got %q", out)
+	}
+	if readStarredAt() == nil {
+		t.Error("after 'star 5': starred_at = nil, want set")
+	}
+
+	out, runErr = runCaptured(t, []string{"star", "--no-refresh", "list"})
+	if runErr != nil {
+		t.Fatalf("run(star list): %v", runErr)
+	}
+	if !strings.Contains(out, "#5") {
+		t.Errorf("expected 'star list' to print the starred session, got %q", out)
+	}
+
+	out, runErr = runCaptured(t, []string{"star", "--no-refresh", "5", "--clear"})
+	if runErr != nil {
+		t.Fatalf("run(star 5 --clear): %v", runErr)
+	}
+	if !strings.Contains(out, "5") || !strings.Contains(out, "unstarred") {
+		t.Errorf("expected the command to print what was cleared, got %q", out)
+	}
+	if readStarredAt() != nil {
+		t.Errorf("after 'star 5 --clear': starred_at = %v, want nil", readStarredAt())
+	}
+}
+
+// TestStarListIsEmptyWithoutStars covers `lazyrecall star list` with nothing
+// starred: the message names the view instead of printing a bare empty
+// listing, the same contract `archive list` has.
+func TestStarListIsEmptyWithoutStars(t *testing.T) {
+	setupGroupTestEnv(t, "")
+
+	out, runErr := runCaptured(t, []string{"star", "--no-refresh", "list"})
+	if runErr != nil {
+		t.Fatalf("run(star list): %v", runErr)
+	}
+	if !strings.Contains(out, "No starred sessions.") {
+		t.Errorf("expected the empty-starred message, got %q", out)
+	}
+}
+
+// TestListStarredFlagShowsOnlyStarred covers --starred on `list`: it selects
+// the same reserved view --group=starred does (every non-archived starred
+// session, whatever group it otherwise belongs to), so an unstarred session
+// drops out - and combining it with an explicit --group is refused rather
+// than letting one of two different views silently win.
+func TestListStarredFlagShowsOnlyStarred(t *testing.T) {
+	install, db := setupGroupTestEnv(t, "[groups.work]\npaths = [\"/code\"]\n")
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "handle"}, []map[string]any{
+		{"id": "lin1", "profile": install, "orphaned": 0, "handle": 5},
+		{"id": "lin2", "profile": install, "orphaned": 0, "handle": 6},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "origin"}, []map[string]any{
+		{"id": "claude:" + install + ":s1", "source": "claude", "source_session_id": "s1", "lineage_id": "lin1", "end_state": "completed", "resumable": 1, "origin": "interactive"},
+		{"id": "claude:" + install + ":s2", "source": "claude", "source_session_id": "s2", "lineage_id": "lin2", "end_state": "completed", "resumable": 1, "origin": "interactive"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, runErr := runCaptured(t, []string{"star", "--no-refresh", "5"}); runErr != nil {
+		t.Fatalf("run(star 5): %v", runErr)
+	}
+
+	out, runErr := runCaptured(t, []string{"list", "--no-refresh", "--starred"})
+	if runErr != nil {
+		t.Fatalf("run(list --starred): %v", runErr)
+	}
+	if !strings.Contains(out, "#5") {
+		t.Errorf("--starred: expected the starred session, got:\n%s", out)
+	}
+	if strings.Contains(out, "#6") {
+		t.Errorf("--starred: expected the unstarred session to be excluded, got:\n%s", out)
+	}
+
+	// --group=starred is the long spelling of the same view.
+	out, runErr = runCaptured(t, []string{"list", "--no-refresh", "--group=starred"})
+	if runErr != nil {
+		t.Fatalf("run(list --group=starred): %v", runErr)
+	}
+	if !strings.Contains(out, "#5") || strings.Contains(out, "#6") {
+		t.Errorf("--group=starred: expected only the starred session, got:\n%s", out)
+	}
+
+	_, runErr = runCaptured(t, []string{"list", "--no-refresh", "--starred", "--group=work"})
+	if runErr == nil {
+		t.Fatal("expected --starred with --group to be an error")
+	}
+	if !strings.Contains(runErr.Error(), "--starred and --group cannot be combined") {
+		t.Errorf("error %q, want the combination message", runErr.Error())
+	}
+}
+
 // TestListJSONEnvelopeShape covers the restored JSON envelope
 // ({"group": ..., "items": [...]}, change group-sessions-in-one-index) for
 // `list --json`: the top-level shape, not just the item array Stage B left
