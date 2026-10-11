@@ -830,8 +830,8 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALU
 		t.Fatalf("seeding v9 database: %v", err)
 	}
 
-	// CurrentVersion is 10 in this build (annotationOnly); bumping it one
-	// further simulates crossing a hypothetical v11 that is NOT
+	// CurrentVersion is 11 in this build (annotationOnly); bumping it one
+	// further simulates crossing a hypothetical v12 that is NOT
 	// annotation-only - annotationOnly has no entry for it, so it defaults
 	// to "needs a rebuild" exactly like every pre-v10 version did.
 	orig := CurrentVersion
@@ -850,6 +850,97 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALU
 	}
 	if len(sessions) != 0 {
 		t.Errorf("expected the index to be rebuilt when the jump also crosses a non-annotation-only version, got %d rows", len(sessions))
+	}
+}
+
+// TestFreshDatabaseHasStarredAtColumn covers the starred-sessions storage
+// task: a fresh install at the current schema version must have
+// lineages.starred_at without going through the migration path at all.
+func TestFreshDatabaseHasStarredAtColumn(t *testing.T) {
+	r := testRunner(t)
+	if _, err := Open(r); err != nil {
+		t.Fatal(err)
+	}
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(cols, "starred_at") {
+		t.Errorf("expected lineages.starred_at to exist on a fresh database, columns: %+v", cols)
+	}
+}
+
+// TestV10ToV11MigrationAddsStarredAtKeepsData covers a v10 database - the
+// version immediately below - gaining lineages.starred_at on the next Open.
+// Like v10 before it, v11 is annotation-only: it touches nothing the
+// disposable index holds, so the real index tables are seeded via indexDDL
+// (v10 and v11 index shapes are identical). A session row is the only
+// record of a session whose transcript Claude Code has since deleted, so
+// dropping the index for a migration that adds an unrelated column would
+// permanently erase it. The pre-existing lineage's custom_name must stay
+// intact and starred_at must default to NULL rather than being backfilled
+// to any stand-in for "not starred".
+func TestV10ToV11MigrationAddsStarredAtKeepsData(t *testing.T) {
+	r := testRunner(t)
+
+	v10DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '10');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER, group_name TEXT, custom_name TEXT);
+CREATE UNIQUE INDEX idx_lineages_handle ON lineages(handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+` + indexDDL + `
+INSERT INTO lineages (id, profile, orphaned, handle, group_name, custom_name) VALUES ('lin_1', 'p', 0, 5, 'work', 'the release checklist');
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, last_activity_at) VALUES ('s1', 'claude', 's1', 'lin_1', 'completed', 12345);
+INSERT INTO prompt_fts (session_id, kind, text) VALUES ('s1', 'prompt', 'do the thing');
+INSERT INTO cursors (source, source_id, kind, updated_at) VALUES ('claude', 's1', 'transcript_offset', 999);
+`
+	if err := r.Exec(v10DDL); err != nil {
+		t.Fatalf("seeding v10 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v10 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var lineageCols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &lineageCols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(lineageCols, "starred_at") {
+		t.Errorf("expected lineages.starred_at to exist after migration, columns: %+v", lineageCols)
+	}
+
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := r.Query(`SELECT id FROM sessions;`, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "s1" {
+		t.Errorf("expected the seeded session to survive an annotation-only migration, got %+v", sessions)
+	}
+
+	var lineage []struct {
+		CustomName *string `json:"custom_name"`
+		StarredAt  *int64  `json:"starred_at"`
+	}
+	if err := r.Query(`SELECT custom_name, starred_at FROM lineages WHERE id = 'lin_1';`, &lineage); err != nil {
+		t.Fatal(err)
+	}
+	if len(lineage) != 1 || lineage[0].CustomName == nil || *lineage[0].CustomName != "the release checklist" || lineage[0].StarredAt != nil {
+		t.Errorf("expected the lineage (custom_name, starred_at) to survive migration with a NULL star, got %+v", lineage)
 	}
 }
 
