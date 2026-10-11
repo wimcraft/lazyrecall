@@ -115,11 +115,7 @@ func fakeAgentOnPath(t *testing.T, name string) {
 func TestResumeChangesDirectoryBeforeInvokingAgent(t *testing.T) {
 	fakeAgentOnPath(t, "claude")
 
-	origWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chdir(origWD) })
+	keepWD(t)
 
 	target, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -129,6 +125,7 @@ func TestResumeChangesDirectoryBeforeInvokingAgent(t *testing.T) {
 	var gotPath string
 	var gotArgv []string
 	var gotWD string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotPath = path
@@ -180,6 +177,7 @@ func TestResumeOtherSourcesPassTheirOwnArguments(t *testing.T) {
 			dir := t.TempDir()
 
 			var gotArgv []string
+			keepWD(t)
 			oldExec := execAgent
 			execAgent = func(path string, argv []string, env []string) error {
 				gotArgv = argv
@@ -212,6 +210,7 @@ func TestResumeRefusesToStartWhenProfileUnresolved(t *testing.T) {
 	dir := t.TempDir()
 
 	called := false
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		called = true
@@ -245,6 +244,7 @@ func TestResumeAppliesProfileEnvOverridingExistingValue(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "/should-not-be-used")
 
 	var gotEnv []string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotEnv = env
@@ -284,6 +284,7 @@ func TestResumeWithNoProfileEnvLeavesEnvironmentUntouched(t *testing.T) {
 	t.Setenv("SOME_MARKER_VAR", "still-here")
 
 	var gotEnv []string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotEnv = env
@@ -347,6 +348,7 @@ func TestResumeReportsFailureWhenAgentCannotBeStarted(t *testing.T) {
 	fakeAgentOnPath(t, "claude")
 	dir := t.TempDir()
 
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		return errors.New("boom")
@@ -435,6 +437,7 @@ func TestAgentCommandSubstitutesEmbeddedPlaceholder(t *testing.T) {
 func TestResumeEmptyTemplateDoesNotAttemptToExec(t *testing.T) {
 	dir := t.TempDir()
 	called := false
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		called = true
@@ -465,6 +468,7 @@ func TestResumeTemplateMetacharactersStayLiteralArgv(t *testing.T) {
 	dir := t.TempDir()
 
 	var gotArgv []string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotArgv = argv
@@ -483,6 +487,21 @@ func TestResumeTemplateMetacharactersStayLiteralArgv(t *testing.T) {
 	}
 }
 
+// keepWD restores the test process's working directory when the test ends.
+// Resume and Launch chdir into the session's directory, usually a
+// t.TempDir() that is deleted when the test finishes; without this the next
+// test starts in a directory that no longer exists, and os.Getwd fails on
+// Linux. When the current directory is already gone, it restores to
+// os.TempDir() instead.
+func keepWD(t *testing.T) {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = os.TempDir()
+	}
+	t.Cleanup(func() { os.Chdir(wd) })
+}
+
 // launchStub records the argv a Launch hands to execAgent instead of
 // replacing the test process, and restores execAgent on cleanup. It returns
 // a pointer to the recorded argv so a test can assert on it after Launch
@@ -490,7 +509,9 @@ func TestResumeTemplateMetacharactersStayLiteralArgv(t *testing.T) {
 // returns nil, so it never truly replaces this process).
 func launchStub(t *testing.T) *[]string {
 	t.Helper()
+	keepWD(t)
 	var gotArgv []string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotArgv = argv
@@ -508,11 +529,7 @@ func launchStub(t *testing.T) *[]string {
 func TestLaunchClaudeShapeExecsFullCommand(t *testing.T) {
 	fakeAgentOnPath(t, "claude")
 
-	origWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chdir(origWD) })
+	keepWD(t)
 
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -521,6 +538,7 @@ func TestLaunchClaudeShapeExecsFullCommand(t *testing.T) {
 
 	var gotArgv []string
 	var gotWD string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotArgv = argv
@@ -613,6 +631,7 @@ func TestLaunchModelWithoutTemplateFailsBeforeExec(t *testing.T) {
 	dir := t.TempDir()
 
 	called := false
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		called = true
@@ -679,11 +698,7 @@ func TestLaunchMissingDirectoryNeedsMkdir(t *testing.T) {
 		t.Errorf("message = %q, want %q", out.Message, want)
 	}
 
-	origWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chdir(origWD) })
+	keepWD(t)
 
 	created := filepath.Join(t.TempDir(), "new-session")
 	gotArgv2 := launchStub(t)
@@ -728,6 +743,7 @@ func TestResumeAppendsModelTemplate(t *testing.T) {
 	dir := t.TempDir()
 
 	var gotArgv []string
+	keepWD(t)
 	oldExec := execAgent
 	execAgent = func(path string, argv []string, env []string) error {
 		gotArgv = argv
