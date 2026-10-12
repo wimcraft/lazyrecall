@@ -830,8 +830,8 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALU
 		t.Fatalf("seeding v9 database: %v", err)
 	}
 
-	// CurrentVersion is 11 in this build (annotationOnly); bumping it one
-	// further simulates crossing a hypothetical v12 that is NOT
+	// CurrentVersion is 12 in this build (annotationOnly); bumping it one
+	// further simulates crossing a hypothetical v13 that is NOT
 	// annotation-only - annotationOnly has no entry for it, so it defaults
 	// to "needs a rebuild" exactly like every pre-v10 version did.
 	orig := CurrentVersion

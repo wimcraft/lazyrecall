@@ -27,6 +27,7 @@ import (
 	"github.com/wimcraft/lazyrecall/internal/profile"
 	"github.com/wimcraft/lazyrecall/internal/refresh"
 	"github.com/wimcraft/lazyrecall/internal/resume"
+	"github.com/wimcraft/lazyrecall/internal/retain"
 	"github.com/wimcraft/lazyrecall/internal/review"
 	"github.com/wimcraft/lazyrecall/internal/search"
 	"github.com/wimcraft/lazyrecall/internal/session"
@@ -209,6 +210,15 @@ func openDB(skipRefresh bool, full bool) (*sqlitex.Runner, error) {
 		if _, err := r.Refresh(refresh.Options{FullRebuild: full}); err != nil {
 			return nil, fmt.Errorf("refreshing index: %w", err)
 		}
+		// Snapshot the transcripts worth keeping while they still exist
+		// (config.Retain), after the refresh has updated the sessions the
+		// rules are matched against. Both results are dropped on purpose:
+		// keeping a copy is a convenience, and a folder that cannot be
+		// written (a full disk, a read-only home) or a session whose
+		// transcript cannot be read must never stop the search the user
+		// actually asked for. The explicit `lazyrecall refresh` is where a
+		// snapshot problem is reported instead.
+		_, _ = retain.AfterRefresh(r.DB, time.Now())
 	}
 	return r.DB, nil
 }
@@ -1333,6 +1343,18 @@ func cmdRefresh(global *flag.FlagSet, args []string) error {
 			fmt.Printf("  %s: unavailable (%v)\n", label, s.Err)
 		}
 	}
+	// The explicit refresh is where a snapshot problem is worth reporting:
+	// every other caller drops the result, because a copy that failed must
+	// not stop a search, but someone who typed `lazyrecall refresh` asked
+	// for exactly this work and gets to see how it went.
+	res, err := retain.AfterRefresh(r.DB, time.Now())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  snapshots: %d copied, %d unchanged, %d already gone\n", res.Copied, res.Unchanged, res.Missing)
+	if res.Failed > 0 {
+		fmt.Printf("  snapshots: %d failed: %v\n", res.Failed, res.Err)
+	}
 	return nil
 }
 
@@ -1526,7 +1548,7 @@ func showConfig(cfg config.Config) error {
 		"retain.sources":       cfg.Retain.Sources,
 		"retain.paths":         cfg.Retain.Paths,
 		"retain.exclude_paths": cfg.Retain.ExcludePaths,
-		"retain.dir":           retainDir(cfg.Retain.Dir),
+		"retain.dir":           retain.DirFor(cfg.Retain),
 		"labels":               cfg.Labels,
 	}
 	names := make([]string, 0, len(cfg.Sources))
@@ -1584,19 +1606,6 @@ func showConfig(cfg config.Config) error {
 		fmt.Printf("%s = %v    (%s)\n", k, values[k], cfg.Origins[k])
 	}
 	return nil
-}
-
-// retainDir is the effective snapshot folder for `config show`: retain.dir
-// when configured, else the default the snapshot writer will use -
-// profile.DataDir()/snapshots. Resolved here, not in config, because
-// internal/config cannot import internal/profile (profile imports config),
-// and showing the configured "" would hide the one thing the reader wants
-// to know: where the copies actually go.
-func retainDir(configured string) string {
-	if configured != "" {
-		return configured
-	}
-	return filepath.Join(profile.DataDir(), "snapshots")
 }
 
 // defaultConfigFile is what `lazyrecall config init` writes: the built-in
