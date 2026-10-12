@@ -281,7 +281,8 @@ func selectSQL(db *sqlitex.Runner, rules config.Retain) (string, *sqlitex.ParamF
 }
 
 // copyFile writes src's bytes to dst without ever leaving a half-written
-// file where a reader could find it: the bytes go to dst+".tmp" first and
+// file where a reader could find it: the bytes go to a temporary file next
+// to dst first and
 // only a completed, flushed, closed file is renamed onto dst, which on
 // every filesystem LazyRecall runs on is an atomic replace. A failure at
 // any point removes the temporary file and leaves whatever was at dst
@@ -296,11 +297,15 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// A temp name of its own, not a fixed dst+".tmp": a browser's R and
+	// another command's automatic refresh can snapshot the same session at
+	// once, and two writers truncating one shared temp file could rename a
+	// mix of both onto dst. os.CreateTemp creates the file 0600.
+	out, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := out.Name()
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
 		os.Remove(tmp)
