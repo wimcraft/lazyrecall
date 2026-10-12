@@ -96,6 +96,14 @@ type Record struct {
 	// whose tool-call block shape has not been confirmed leaves it empty
 	// and the reader shows an unnamed tool call rather than a guess.
 	Tool []string
+
+	// Files names the file paths a KindToolUse record's file tools worked
+	// on, in first-seen order and without duplicates. Only Claude Code's
+	// file tools carry a path to a file rather than a directory, a pattern
+	// or shell text, so a record from any other source, and a call to any
+	// other tool, leaves it empty. Like Tool it is display detail for the
+	// Transcript tab only - nothing in the index reads it.
+	Files []string
 }
 
 // CompactionInfo is the compaction detail extracted from one
@@ -423,6 +431,58 @@ func namesFromBlocks(blocks []any, blockType string) []string {
 		}
 		if !seen {
 			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// fileToolKeys maps each of Claude Code's file tools to the input key
+// holding the file it worked on. Every other tool is deliberately absent:
+// its paths are directories, patterns or shell text, not the files a
+// session worked on, and listing them would put a working directory in a
+// list of changed files.
+var fileToolKeys = map[string]string{
+	"Read":         "file_path",
+	"Edit":         "file_path",
+	"MultiEdit":    "file_path",
+	"Write":        "file_path",
+	"NotebookEdit": "notebook_path",
+}
+
+// filesFromBlocks collects the file paths named by the tool_use blocks of
+// one assistant record, in order and without duplicates. A block for any
+// tool outside fileToolKeys contributes nothing, and neither does one
+// whose key is missing or empty: an unnamed path would show up as a blank
+// entry in the list of files a session touched.
+func filesFromBlocks(blocks []any) []string {
+	var out []string
+	for _, b := range blocks {
+		bm, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := bm["type"].(string); t != "tool_use" {
+			continue
+		}
+		name, _ := bm["name"].(string)
+		key, ok := fileToolKeys[name]
+		if !ok {
+			continue
+		}
+		input, _ := bm["input"].(map[string]any)
+		path, _ := input[key].(string)
+		if path == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == path {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, path)
 		}
 	}
 	return out

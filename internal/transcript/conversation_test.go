@@ -58,6 +58,61 @@ func TestConversationKeepsTurnsInOrder(t *testing.T) {
 	}
 }
 
+// A tool call's file paths are what T21's References tab will list, so the
+// reader has to keep them: the file tools' target path, in order, from the
+// tool_use blocks themselves. Tools whose path is a directory, a pattern or
+// shell text (Bash, Grep, ...) are not files the session worked on and
+// contribute nothing.
+func TestConversationKeepsToolFilePaths(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"fix the flaky test"},"cwd":"/work/repo","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Edit","input":{"file_path":"/repo/internal/app.go","old_string":"a","new_string":"b"}},{"type":"tool_use","id":"toolu_02","name":"Read","input":{"file_path":"/repo/README.md"}}],"stop_reason":"tool_use"},"timestamp":"2026-01-01T00:00:02Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_03","name":"NotebookEdit","input":{"notebook_path":"/repo/nb.ipynb","new_source":"x"}},{"type":"tool_use","id":"toolu_04","name":"Bash","input":{"command":"cat /etc/hosts"}},{"type":"tool_use","id":"toolu_05","name":"Grep","input":{"pattern":"x","path":"/repo"}}],"stop_reason":"tool_use"},"timestamp":"2026-01-01T00:00:03Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+
+	turns, _, err := Conversation(p, claudeVocabOrFail(t), DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 3 {
+		t.Fatalf("got %d turns, want 3: %+v", len(turns), turns)
+	}
+	if got := strings.Join(turns[1].Files, ","); got != "/repo/internal/app.go,/repo/README.md" {
+		t.Errorf("file paths = %q, want /repo/internal/app.go,/repo/README.md", got)
+	}
+	if got := strings.Join(turns[2].Files, ","); got != "/repo/nb.ipynb" {
+		t.Errorf("file paths = %q, want /repo/nb.ipynb only", got)
+	}
+	if got := strings.Join(turns[1].Tool, ","); got != "Edit,Read" {
+		t.Errorf("tool names = %q, want Edit,Read", got)
+	}
+	if got := strings.Join(turns[2].Tool, ","); got != "NotebookEdit,Bash,Grep" {
+		t.Errorf("tool names = %q, want NotebookEdit,Bash,Grep", got)
+	}
+}
+
+// Two blocks naming the same file are one entry, the same way two blocks
+// naming the same tool are one name: the list is the files the turn
+// touched, not the calls it made.
+func TestConversationDeduplicatesToolFilePaths(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/repo/x.go"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/repo/x.go"}},{"type":"tool_use","name":"Read","input":{}}],"stop_reason":"tool_use"},"timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+
+	turns, _, err := Conversation(p, claudeVocabOrFail(t), DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 {
+		t.Fatalf("got %d turns, want 1: %+v", len(turns), turns)
+	}
+	if got := strings.Join(turns[0].Files, ","); got != "/repo/x.go" {
+		t.Errorf("file paths = %q, want /repo/x.go once", got)
+	}
+}
+
 // A thinking-only assistant record classifies as KindAssistantText with no
 // text at all. It must not become a blank turn: the pane would show a
 // speaker label with nothing under it.
