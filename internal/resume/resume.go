@@ -7,15 +7,18 @@
 // child and exiting with its status (see exec_fallback.go). This supersedes
 // the earlier herdr-delegated design: LazyRecall cannot leave its caller's shell
 // in a directory after it exits, but it can run a program in one directly,
-// which is all resumption ever needed. Nothing here ever writes to a session
-// source - the only process that touches source data is the agent it hands
-// off to.
+// which is all resumption ever needed. The only write this package makes
+// into a session source is putting back a transcript LazyRecall kept a copy
+// of and the agent had deleted (restoreTranscript) - never overwriting, only
+// ever creating the exact file the agent itself wrote.
 package resume
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/wimcraft/lazyrecall/internal/config"
@@ -87,6 +90,20 @@ type Target struct {
 	ProfileUnresolved bool
 	// ProfileUnresolvedReason explains why, for the message Resume reports.
 	ProfileUnresolvedReason string
+
+	// RestoreFrom and RestoreTo are set together for a session whose own
+	// transcript file is gone but which LazyRecall kept a copy of
+	// (search.Item.Snapshotted): RestoreFrom is LazyRecall's copy, RestoreTo
+	// the path the agent itself wrote. Before handing off, Resume copies
+	// the copy back to RestoreTo, because the agent cannot resume a
+	// session whose transcript is missing ("No conversation found with
+	// session ID: ..."). This is the one place LazyRecall writes into
+	// another tool's folder, so the write is deliberately narrow: it only
+	// ever creates the exact file the agent wrote and later deleted, and
+	// never overwrites an existing one. Both empty - the common case -
+	// means there is nothing to restore.
+	RestoreFrom string
+	RestoreTo   string
 }
 
 // agentCommand is the program and argument vector that resumes a specific
@@ -311,10 +328,58 @@ type Outcome struct {
 // (syscall.Exec) or exec_fallback.go (child process + os.Exit).
 var execAgent = platformExec
 
-// Resume places the user into t's session: changes to its recorded working
+// restoreTranscript copies LazyRecall's own copy of a session's transcript
+// (from) back to the path the agent wrote it to (to), which is the one write
+// LazyRecall makes into another tool's data and the only way a session whose
+// agent deleted its own transcript can be resumed again ("No conversation
+// found with session ID: ..."). It creates a file the agent itself had
+// written and later removed, and only ever that: an already existing to -
+// the transcript back, or the agent rewriting it right now - is left
+// completely untouched, because LazyRecall has no way to tell a stale file
+// from a live one and overwriting either could destroy history it does not
+// own. to is created with O_EXCL so the check and the create cannot be raced
+// apart, and a partial file is removed if the copy fails partway, so a later
+// attempt sees the same state an absent file would give it.
+func restoreTranscript(from, to string) error {
+	if _, err := os.Lstat(to); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return err
+	}
+	src, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		os.Remove(to)
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		dst.Close()
+		os.Remove(to)
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		os.Remove(to)
+		return err
+	}
+	return nil
+}
+
+// Resume places the user into t's session: restores the session's transcript
+// copy if it has one (see RestoreFrom), changes to its recorded working
 // directory, then hands off to the agent that produced it (design.md
-// decisions 1-3; spec session-resume). It never writes anything to t's
-// source - the only side effect is handing off to another process.
+// decisions 1-3; spec session-resume). The only side effects are that
+// restore, which never overwrites an existing file, and handing off to
+// another process.
 func Resume(t Target) Outcome {
 	if !t.Resumable || t.CWD == nil || *t.CWD == "" {
 		return Outcome{
@@ -374,6 +439,18 @@ func Resume(t Target) Outcome {
 	path, err := exec.LookPath(program)
 	if err != nil {
 		return Outcome{Failed: true, Message: fmt.Sprintf("%s is not installed; the session cannot be resumed without it.", program)}
+	}
+
+	// Restore the transcript copy, when the session has one, only after the
+	// program resolved: a source with no agent installed must not leave a
+	// file behind in its folder for a resume that then fails. This is also
+	// why the restore sits before the chdir - it reads and writes absolute
+	// paths, so the working directory is irrelevant to it, and failing the
+	// restore must not have moved the process anywhere.
+	if t.RestoreTo != "" {
+		if err := restoreTranscript(t.RestoreFrom, t.RestoreTo); err != nil {
+			return Outcome{Failed: true, Message: fmt.Sprintf("could not restore the transcript from lazyrecall's copy: %v", err)}
+		}
 	}
 
 	if err := os.Chdir(*t.CWD); err != nil {

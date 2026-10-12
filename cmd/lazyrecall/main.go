@@ -640,6 +640,10 @@ func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) e
 	// this call only ever runs on a failure path - there is no LazyRecall left
 	// to report success from.
 	tpl, profileEnv, profileOK, profileReason := resumeSource(target.Source, session.InstallFromID(target.SessionID))
+	var restoreFrom, restoreTo string
+	if target.Snapshotted && target.AgentTranscriptPath != nil && target.TranscriptPath != nil {
+		restoreFrom, restoreTo = *target.TranscriptPath, *target.AgentTranscriptPath
+	}
 	out := resume.Resume(resume.Target{
 		Source: target.Source, SourceSessionID: sourceSessionIDFrom(target.SessionID),
 		CWD: target.CWD, GitRepoRoot: target.GitRepoRoot, DirExists: target.DirExists,
@@ -651,6 +655,8 @@ func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) e
 		ProfileEnv:              profileEnv,
 		ProfileUnresolved:       !profileOK,
 		ProfileUnresolvedReason: profileReason,
+		RestoreFrom:             restoreFrom,
+		RestoreTo:               restoreTo,
 	})
 	if *jsonFlag {
 		enc := json.NewEncoder(os.Stdout)
@@ -1882,6 +1888,10 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 	// replace this process - there is no later point at which it could
 	// still be undone.
 	tpl, profileEnv, profileOK, profileReason := resumeSource(selected.Source, session.InstallFromID(selected.SessionID))
+	var restoreFrom, restoreTo string
+	if selected.Snapshotted && selected.AgentTranscriptPath != nil && selected.TranscriptPath != nil {
+		restoreFrom, restoreTo = *selected.TranscriptPath, *selected.AgentTranscriptPath
+	}
 	out := resume.Resume(resume.Target{
 		Source: selected.Source, SourceSessionID: sourceSessionIDFrom(selected.SessionID),
 		CWD: selected.CWD, GitRepoRoot: selected.GitRepoRoot, DirExists: selected.DirExists,
@@ -1891,6 +1901,8 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 		ProfileEnv:              profileEnv,
 		ProfileUnresolved:       !profileOK,
 		ProfileUnresolvedReason: profileReason,
+		RestoreFrom:             restoreFrom,
+		RestoreTo:               restoreTo,
 	})
 	fmt.Println(out.Message)
 	return nil

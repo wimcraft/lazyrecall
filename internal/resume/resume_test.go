@@ -785,3 +785,206 @@ func TestResumeModelWithoutTemplateFailsBeforeExec(t *testing.T) {
 		t.Errorf("message = %q, want %q", out.Message, want)
 	}
 }
+
+// resumeStub replaces execAgent with a double that records whether it was
+// called at all, so a test can tell a resume that reached the agent from one
+// that stopped before it. Every Resume test that stubs execAgent needs
+// keepWD(t), because Resume chdirs into a temp dir that the test then
+// deletes.
+func resumeStub(t *testing.T) *bool {
+	t.Helper()
+	keepWD(t)
+	called := false
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+	return &called
+}
+
+// TestResumeRestoresTranscriptFromCopy covers the T19 core: a session whose
+// own transcript the agent deleted, but whose copy LazyRecall kept, resumes
+// only because Resume puts the copy back at the agent's own path first. The
+// copy's parent directory is missing too, matching a transcript that was
+// written under a per-project folder the agent removed on its own cleanup;
+// Resume must recreate it. execAgent is stubbed, so this test asserts the
+// restore without replacing itself.
+func TestResumeRestoresTranscriptFromCopy(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+
+	copyDir := t.TempDir()
+	from := filepath.Join(copyDir, "copy.jsonl")
+	content := []byte("{\"type\":\"user\",\"message\":\"hello\"}\n")
+	if err := os.WriteFile(from, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The agent's path sits under a project folder that no longer exists.
+	to := filepath.Join(dir, "gone-project", "abc.jsonl")
+
+	called := resumeStub(t)
+
+	// The stub returns nil, so Resume reaches its unreachable-return safety
+	// net; whether the agent started is what this test asserts, and out is
+	// deliberately ignored, the same as every existing Resume test that
+	// stubs execAgent.
+	Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume:      []string{"claude", "--resume", "{id}"},
+		RestoreFrom: from, RestoreTo: to,
+	})
+	if !*called {
+		t.Fatal("expected the agent to be started once the transcript was restored")
+	}
+
+	got, err := os.ReadFile(to)
+	if err != nil {
+		t.Fatalf("the copy must exist at the agent's own path: %v", err)
+	}
+	if !reflect.DeepEqual(got, content) {
+		t.Errorf("restored content = %q, want the copy's %q", got, content)
+	}
+	info, err := os.Stat(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("restored mode = %o, want 600", perm)
+	}
+}
+
+// TestResumeLeavesExistingTranscriptUntouched covers LazyRecall's promise
+// never to overwrite: when the agent's file is back (or the agent recreated
+// it while running), Resume starts the agent and leaves that file exactly as
+// it found it, even though the copy differs.
+func TestResumeLeavesExistingTranscriptUntouched(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+
+	from := filepath.Join(t.TempDir(), "copy.jsonl")
+	if err := os.WriteFile(from, []byte("lazyrecall's copy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(t.TempDir(), "abc.jsonl")
+	existing := []byte("the agent's own, newer transcript\n")
+	if err := os.WriteFile(to, existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	called := resumeStub(t)
+
+	Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume:      []string{"claude", "--resume", "{id}"},
+		RestoreFrom: from, RestoreTo: to,
+	})
+	if !*called {
+		t.Fatal("expected the agent to be started when the transcript was already there")
+	}
+
+	got, err := os.ReadFile(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, existing) {
+		t.Errorf("existing transcript = %q, want it left untouched as %q", got, existing)
+	}
+	info, err := os.Stat(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("existing mode = %o, want it left at 644", perm)
+	}
+}
+
+// TestResumeReportsFailedRestoreWhenCopyMissing covers the failure path: the
+// copy LazyRecall was told about is itself gone, so the restore cannot
+// happen and Resume must say so instead of starting an agent that would only
+// fail with "No conversation found". Nothing may be left behind at the
+// agent's path - a zero-length file there would look like a real transcript
+// to the agent and to a later resume.
+func TestResumeReportsFailedRestoreWhenCopyMissing(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+
+	from := filepath.Join(t.TempDir(), "never-written.jsonl")
+	to := filepath.Join(t.TempDir(), "abc.jsonl")
+
+	called := resumeStub(t)
+
+	out := Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume:      []string{"claude", "--resume", "{id}"},
+		RestoreFrom: from, RestoreTo: to,
+	})
+	if !out.Failed {
+		t.Fatalf("expected Failed, got %+v", out)
+	}
+	if !strings.HasPrefix(out.Message, "could not restore the transcript from lazyrecall's copy: ") {
+		t.Errorf("message = %q, want the restore-failure prefix", out.Message)
+	}
+	if *called {
+		t.Error("execAgent must not run when the transcript could not be restored")
+	}
+	if _, err := os.Lstat(to); !os.IsNotExist(err) {
+		t.Errorf("no file may be left at %q after a failed restore, got err %v", to, err)
+	}
+}
+
+// TestResumeDoesNotRestoreWhenAgentMissing pins the ordering the task
+// requires: the restore happens after exec.LookPath, so a source whose agent
+// is not installed never writes anything into its folder - a failed resume
+// must have no side effect at all.
+func TestResumeDoesNotRestoreWhenAgentMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+
+	from := filepath.Join(t.TempDir(), "copy.jsonl")
+	if err := os.WriteFile(from, []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(t.TempDir(), "abc.jsonl")
+
+	out := Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume:      []string{"claude", "--resume", "{id}"},
+		RestoreFrom: from, RestoreTo: to,
+	})
+	if !out.Failed {
+		t.Fatalf("expected Failed for a missing program, got %+v", out)
+	}
+	if !strings.Contains(out.Message, "not installed") {
+		t.Errorf("expected the missing-program message, got %q", out.Message)
+	}
+	if _, err := os.Lstat(to); !os.IsNotExist(err) {
+		t.Errorf("a missing agent must write nothing, but %q exists (err %v)", to, err)
+	}
+}
+
+// TestResumeEmptyRestoreToWritesNothing covers the untouched common case:
+// RestoreFrom is set but RestoreTo is empty, meaning the caller had no
+// destination to restore to. Resume must behave exactly as it did before
+// T19 existed - start the agent and write nothing anywhere.
+func TestResumeEmptyRestoreToWritesNothing(t *testing.T) {
+	fakeAgentOnPath(t, "claude")
+	dir := t.TempDir()
+
+	from := filepath.Join(t.TempDir(), "copy.jsonl")
+	if err := os.WriteFile(from, []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	called := resumeStub(t)
+
+	Resume(Target{
+		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume:      []string{"claude", "--resume", "{id}"},
+		RestoreFrom: from,
+	})
+	if !*called {
+		t.Fatal("expected the agent to be started when there was no destination to restore to")
+	}
+}
