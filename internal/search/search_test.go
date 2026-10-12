@@ -237,6 +237,119 @@ func TestTranscriptGoneWhenFileMissing(t *testing.T) {
 	}
 }
 
+// TestSnapshottedWhenOriginalGoneAndCopyExists covers the case the snapshot
+// folder exists for: the agent's own transcript file is gone (Claude Code's
+// cleanupPeriodDays), but LazyRecall copied the transcript while it still
+// existed (internal/retain). The copy is then read in the original's place,
+// so the session looks and reads like any other - TranscriptPath points at
+// the copy, the row is not flagged gone - while AgentTranscriptPath keeps
+// the path the agent wrote, which is where a resume has to put the file back
+// (T19). A snapshot row whose own file has gone missing too buys nothing,
+// and a session whose original still exists is untouched by its snapshot
+// row.
+func TestSnapshottedWhenOriginalGoneAndCopyExists(t *testing.T) {
+	db := testDB(t)
+	dir := t.TempDir()
+	copyPath := filepath.Join(dir, "copy.jsonl")
+	if err := os.WriteFile(copyPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	present := filepath.Join(dir, "present.jsonl")
+	if err := os.WriteFile(present, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "cleaned-up.jsonl")
+	lostCopy := filepath.Join(dir, "lost-copy.jsonl")
+	orphanCopy := filepath.Join(dir, "orphan-copy.jsonl")
+	if err := os.WriteFile(orphanCopy, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 400,
+		"transcript_path": gone,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:2", "source": "claude", "source_session_id": "2", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 300,
+		"transcript_path": gone,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:3", "source": "claude", "source_session_id": "3", "lineage_id": "lin3",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+		"transcript_path": present,
+	})
+
+	b := db.NewBatch()
+	if err := b.BulkUpsert("snapshots", []string{"session_id"},
+		[]string{"session_id", "path", "source_size", "source_mtime", "copied_at"},
+		[]map[string]any{
+			{"session_id": "claude:p:1", "path": copyPath, "source_size": 3, "source_mtime": 1, "copied_at": 1},
+			{"session_id": "claude:p:2", "path": lostCopy, "source_size": 3, "source_mtime": 1, "copied_at": 1},
+			{"session_id": "claude:p:3", "path": orphanCopy, "source_size": 3, "source_mtime": 1, "copied_at": 1},
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected all three sessions to stay listed, got %+v", items)
+	}
+	byID := make(map[string]Item, len(items))
+	for _, it := range items {
+		byID[it.SessionID] = it
+	}
+
+	// Original gone, copy readable: the copy is read in its place.
+	snap := byID["claude:p:1"]
+	if !snap.Snapshotted {
+		t.Error("a session whose original is gone but whose copy is readable must be Snapshotted")
+	}
+	if snap.TranscriptGone {
+		t.Error("a snapshotted session must not be flagged as gone")
+	}
+	if snap.TranscriptPath == nil || *snap.TranscriptPath != copyPath {
+		t.Errorf("TranscriptPath = %v, want the copy %q", snap.TranscriptPath, copyPath)
+	}
+	if snap.AgentTranscriptPath == nil || *snap.AgentTranscriptPath != gone {
+		t.Errorf("AgentTranscriptPath = %v, want the agent's original %q", snap.AgentTranscriptPath, gone)
+	}
+
+	// Original gone and the copy gone too: nothing to read, gone as before.
+	lost := byID["claude:p:2"]
+	if lost.Snapshotted {
+		t.Error("a snapshot row whose own file is missing must not make the session read as snapshotted")
+	}
+	if !lost.TranscriptGone {
+		t.Error("a session with neither its original nor its copy must still be flagged as gone")
+	}
+	if lost.TranscriptPath == nil || *lost.TranscriptPath != gone {
+		t.Errorf("a gone session's TranscriptPath must be left as recorded, got %v", lost.TranscriptPath)
+	}
+	if lost.AgentTranscriptPath != nil {
+		t.Errorf("a gone session must carry no AgentTranscriptPath, got %v", *lost.AgentTranscriptPath)
+	}
+
+	// Original present: a snapshot row must not change anything.
+	live := byID["claude:p:3"]
+	if live.Snapshotted {
+		t.Error("a session whose original still exists must not be Snapshotted, whatever its snapshot row says")
+	}
+	if live.TranscriptPath == nil || *live.TranscriptPath != present {
+		t.Errorf("a live session's TranscriptPath must stay the original, got %v", live.TranscriptPath)
+	}
+	if live.AgentTranscriptPath != nil {
+		t.Errorf("a live session must carry no AgentTranscriptPath, got %v", *live.AgentTranscriptPath)
+	}
+}
+
 func TestFilterByTimeRange(t *testing.T) {
 	db := testDB(t)
 	seedSession(t, db, map[string]any{

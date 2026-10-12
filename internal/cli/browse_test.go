@@ -2458,6 +2458,30 @@ func TestRenderItemDetailShowsClientWithItsRawValue(t *testing.T) {
 	}
 }
 
+// TestRenderItemDetailShowsSnapshotLineInsteadOfGone covers the Detail
+// tab's explanation of a snapshotted session (search.Item.Snapshotted): the
+// agent deleted the original file, so LazyRecall's copy is being read in
+// its place and the session is not dimmed anywhere else - the Detail tab,
+// the one surface with room to explain it, says where the conversation
+// comes from and what a resume will do, and does not print the gone line
+// that would wrongly say the session cannot be resumed at all.
+func TestRenderItemDetailShowsSnapshotLineInsteadOfGone(t *testing.T) {
+	db := browseTestDB(t)
+	original := "/home/u/.claude-personal/projects/x/1.jsonl"
+	copyPath := "/home/u/.lazyrecall/snapshots/claude/cc/1.jsonl"
+	it := search.Item{
+		SessionID: "claude:p:1", Source: "claude", Snapshotted: true,
+		TranscriptPath: &copyPath, AgentTranscriptPath: &original,
+	}
+	got := renderItemDetail(db, it, nil, noInstallInfo, RenderOptions{Width: 80})
+	if !strings.Contains(got, "transcript: lazyrecall's copy - the agent deleted its file; resuming puts it back") {
+		t.Errorf("the detail pane does not say the transcript is lazyrecall's copy:\n%s", got)
+	}
+	if strings.Contains(got, "transcript: gone") {
+		t.Errorf("a snapshotted session must not also get the gone line:\n%s", got)
+	}
+}
+
 // ---------------------------------------------------------------------
 // The action-menu popup
 // ---------------------------------------------------------------------
