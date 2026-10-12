@@ -43,7 +43,7 @@ lazyrecall is a local, read-only index over every coding-agent session already o
 - **Never change anything without being asked.** `star`, `tag`, `archive`, `name` and `comment` write to the user's own index, and `refresh --full` discards and rebuilds it - run none of them unless the user asks in this conversation.
 - **Never disable redaction.** `export` redacts credentials (API keys, tokens, private keys) by default; never pass `--no-redact`.
 - **Skip sessions whose `transcript_gone` is true.** The agent has deleted the file, so there is nothing to read; say so if such a session is the only hit.
-- **Say when nothing matches** instead of guessing. `search` prints `No session matched ...` and an empty `items` array; report that and offer a looser query rather than inventing an answer.
+- **Say when nothing matches** instead of guessing. With `--json`, `search` prints an empty `items` array; report that and offer a looser query rather than inventing an answer.
 
 ## Example
 
