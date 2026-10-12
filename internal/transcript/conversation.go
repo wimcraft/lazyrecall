@@ -32,7 +32,11 @@ type Turn struct {
 	// records them (see Record.Tool). Empty means the call happened but
 	// went unnamed, never that there was no call.
 	Tool []string
-	At   *time.Time
+	// Files names the file paths a KindToolUse turn's file tools worked on,
+	// when the source records them (see Record.Files). Empty means the
+	// turn touched no file, or the source does not record file paths.
+	Files []string
+	At    *time.Time
 }
 
 // ConversationLimits bounds one Conversation read. Both fields must be
@@ -156,7 +160,7 @@ func toTurn(rec Record, maxBytes int) (Turn, bool) {
 	if rec.Text != nil {
 		text = *rec.Text
 	}
-	return normalizeTurn(Turn{Kind: rec.Kind, Text: text, Tool: rec.Tool, At: rec.Timestamp}, maxBytes)
+	return normalizeTurn(Turn{Kind: rec.Kind, Text: text, Tool: rec.Tool, Files: rec.Files, At: rec.Timestamp}, maxBytes)
 }
 
 // normalizeTurn is the single decision about what a displayable turn is,
