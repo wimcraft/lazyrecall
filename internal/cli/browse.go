@@ -3532,9 +3532,15 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, groups []config.Group,
 	// The end state above still says how the conversation finished; this
 	// line says why the session cannot be carried on from here, so the
 	// dimmed state slot in the row ("[gone]") is explained on the one
-	// surface with room to explain it.
+	// surface with room to explain it. A session whose file is gone but
+	// whose LazyRecall copy is being read instead reads like a live one
+	// everywhere else (search.Item.Snapshotted) - so it gets a line of its
+	// own here rather than the gone line, saying where the conversation the
+	// other tabs are showing actually comes from.
 	if it.TranscriptGone {
 		fmt.Fprintf(&b, "transcript: %s\n", style("gone - removed by the agent's cleanup; this session cannot be resumed", ansiDim, opts.Style))
+	} else if it.Snapshotted {
+		fmt.Fprintf(&b, "transcript: %s\n", style("lazyrecall's copy - the agent deleted its file; resuming puts it back", ansiDim, opts.Style))
 	}
 	if it.LastActivityAt != nil {
 		active := fmt.Sprintf("%s (%s)", it.LastActivityAt.Format(time.RFC3339), relativeTime(*it.LastActivityAt))

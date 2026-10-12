@@ -130,6 +130,22 @@ type Item struct {
 	// it has no schema of its own; a nil or empty TranscriptPath leaves it
 	// false, since a source that keeps no transcript has not lost one.
 	TranscriptGone bool
+	// Snapshotted is true when the session's own transcript file is gone
+	// but LazyRecall kept a copy of it (internal/retain, the durable
+	// snapshots table) and TranscriptPath points at that copy instead. The
+	// copy is read in the original's place, so everything that reads a
+	// transcript - the Transcript tab, export - works unchanged; AgentTranscriptPath
+	// remembers where the agent's own file belongs, for a resume to put back.
+	// It is never true together with TranscriptGone: a copy that is itself
+	// missing buys nothing and leaves the session gone as before.
+	Snapshotted bool
+	// AgentTranscriptPath is the path the agent itself wrote this session's
+	// transcript to, set only when Snapshotted - that is, only when
+	// TranscriptPath has been redirected at LazyRecall's copy and the
+	// original's location would otherwise be lost. A resume restores the
+	// copy to this path before starting the agent (T19). Nil on every other
+	// session, where TranscriptPath already is the agent's own path.
+	AgentTranscriptPath *string
 	// SourceSessionID is the identifier the source itself uses for this
 	// session, as distinct from SessionID, which is LazyRecall's composite
 	// "<source>:<profile>:<id>". It is what a source's own database has to
@@ -207,7 +223,8 @@ const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
 	s.started_at, s.last_activity_at, s.topic, s.name, l.custom_name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.source_session_id, s.resumable,
 	l.archived_at IS NOT NULL AS archived, l.starred_at IS NOT NULL AS starred, s.install, l.group_name IS NOT NULL AS group_manual,
-	(SELECT COUNT(*) FROM comments WHERE comments.lineage_id = s.lineage_id) AS comment_count`
+	(SELECT COUNT(*) FROM comments WHERE comments.lineage_id = s.lineage_id) AS comment_count,
+	(SELECT path FROM snapshots WHERE snapshots.session_id = s.id) AS snapshot_path`
 
 type itemRow struct {
 	ID              string  `json:"id"`
@@ -237,6 +254,12 @@ type itemRow struct {
 	Install         *string `json:"install"`
 	GroupManual     int64   `json:"group_manual"`
 	CommentCount    int64   `json:"comment_count"`
+	// SnapshotPath is the copy internal/retain made of this session's
+	// transcript, when there is one (the durable snapshots table, keyed by
+	// session id) - the stand-in for the agent's own file once that is
+	// gone. Nil when LazyRecall never copied this session's transcript,
+	// which is the ordinary case for a session whose file is still there.
+	SnapshotPath *string `json:"snapshot_path"`
 	// EffectiveGroup is not part of itemColumns - it depends on the ParamFile
 	// and configured groups, so every query appends it to the SELECT list
 	// itself (see effectiveGroupExpr) under this same alias.
@@ -305,9 +328,36 @@ func (row itemRow) toItem() Item {
 	// about it. Only a definite "no such file" counts; any other stat error
 	// (a permission problem, say) leaves the session unflagged, since we
 	// cannot tell whether the file is really gone.
+	//
+	// When LazyRecall kept a copy of that same transcript (internal/retain's
+	// snapshots table) and the copy is still readable, the copy is read in
+	// the original's place: TranscriptPath is redirected at it and
+	// Snapshotted says so, so the Transcript tab, export and every other
+	// reader work unchanged - the session simply reads like a live one -
+	// while AgentTranscriptPath remembers where the agent's own file was, for
+	// a resume to put the copy back (T19). A copy that is itself missing is
+	// worth nothing and leaves the session gone, which is also the case for a
+	// session that never had one.
 	if row.TranscriptPath != nil && *row.TranscriptPath != "" {
 		if _, err := os.Stat(*row.TranscriptPath); errors.Is(err, fs.ErrNotExist) {
-			it.TranscriptGone = true
+			// The copy is only worth redirecting at when it is actually
+			// readable: a snapshot row whose own file has since been removed
+			// (the folder cleaned out by hand, say) leaves the session exactly
+			// as gone as one that never had a copy.
+			copyPath := ""
+			if row.SnapshotPath != nil {
+				if _, err := os.Stat(*row.SnapshotPath); err == nil {
+					copyPath = *row.SnapshotPath
+				}
+			}
+			if copyPath == "" {
+				it.TranscriptGone = true
+			} else {
+				original := *row.TranscriptPath
+				it.AgentTranscriptPath = &original
+				it.TranscriptPath = &copyPath
+				it.Snapshotted = true
+			}
 		}
 	}
 	return it

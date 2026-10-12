@@ -37,14 +37,20 @@ type jsonItem struct {
 	// TranscriptGone flags a session whose recorded transcript file has
 	// been deleted since the last refresh, so a script can tell a
 	// session that is still resumable apart from one that is not.
-	TranscriptGone bool     `json:"transcript_gone,omitempty"`
-	MessageCount   *int64   `json:"message_count,omitempty"`
-	Resumable      bool     `json:"resumable"`
-	Archived       bool     `json:"archived,omitempty"`
-	Starred        bool     `json:"starred,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	CommentCount   int      `json:"comment_count,omitempty"`
-	MatchSnippet   string   `json:"match_snippet,omitempty"`
+	TranscriptGone bool `json:"transcript_gone,omitempty"`
+	// Snapshotted flags a session whose transcript is being read from
+	// LazyRecall's own copy because the agent deleted the original, so a
+	// script can tell a session carried by a copy apart from one whose own
+	// file is still there - useful precisely because such a session is
+	// otherwise indistinguishable from a live one.
+	Snapshotted  bool     `json:"snapshotted,omitempty"`
+	MessageCount *int64   `json:"message_count,omitempty"`
+	Resumable    bool     `json:"resumable"`
+	Archived     bool     `json:"archived,omitempty"`
+	Starred      bool     `json:"starred,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	CommentCount int      `json:"comment_count,omitempty"`
+	MatchSnippet string   `json:"match_snippet,omitempty"`
 }
 
 func toJSONItem(it search.Item) jsonItem {
@@ -54,7 +60,8 @@ func toJSONItem(it search.Item) jsonItem {
 		Topic: it.Topic, Name: it.Name, CustomName: it.CustomName, LastPrompt: it.LastPrompt, EndState: string(it.EndState),
 		Origin:    string(it.Origin),
 		Client:    it.Client,
-		DirExists: it.DirExists, TranscriptGone: it.TranscriptGone, MessageCount: it.MessageCount, Resumable: it.Resumable,
+		DirExists: it.DirExists, TranscriptGone: it.TranscriptGone, Snapshotted: it.Snapshotted,
+		MessageCount: it.MessageCount, Resumable: it.Resumable,
 		Archived: it.Archived, Starred: it.Starred, Tags: it.Tags, CommentCount: it.CommentCount, MatchSnippet: it.MatchSnippet,
 	}
 	if it.StartedAt != nil {
