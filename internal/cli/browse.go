@@ -37,6 +37,7 @@ import (
 	"github.com/wimcraft/lazyrecall/internal/config"
 	"github.com/wimcraft/lazyrecall/internal/profile"
 	"github.com/wimcraft/lazyrecall/internal/refresh"
+	"github.com/wimcraft/lazyrecall/internal/retain"
 	"github.com/wimcraft/lazyrecall/internal/search"
 	"github.com/wimcraft/lazyrecall/internal/session"
 	"github.com/wimcraft/lazyrecall/internal/sqlitex"
@@ -2404,8 +2405,16 @@ func (m browseModel) refreshCmd() tea.Cmd {
 		if err != nil {
 			return refreshDoneMsg{err: err}
 		}
-		_, err = r.Refresh(refresh.Options{})
-		return refreshDoneMsg{err: err}
+		if _, err := r.Refresh(refresh.Options{}); err != nil {
+			return refreshDoneMsg{err: err}
+		}
+		// Snapshot the transcripts the retain rules keep, right after the
+		// refresh that updated the sessions they match against. The result
+		// is dropped on purpose: the user pressed R to see fresh sessions,
+		// and a snapshot that could not be written is no reason to leave
+		// the browser showing the old ones.
+		_, _ = retain.AfterRefresh(r.DB, time.Now())
+		return refreshDoneMsg{}
 	}
 }
 

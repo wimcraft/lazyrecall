@@ -1,9 +1,10 @@
 // Package schema defines LazyRecall's own database schema - the index tables
 // (sessions, prompt search, per-source cursors) and the annotation tables
-// (lineages, comments, tags) - and the rule for evolving it: the index is
-// disposable and gets discarded and rebuilt on a schema change; annotations
-// are the one thing LazyRecall originates, so they are migrated forward and
-// never rebuilt (design.md "Migration Plan"; tasks.md 2.4-2.6).
+// (lineages, comments, tags, and the snapshots copied out of the agents'
+// transcripts) - and the rule for evolving it: the index is disposable and
+// gets discarded and rebuilt on a schema change; annotations are the one
+// thing LazyRecall originates, so they are migrated forward and never
+// rebuilt (design.md "Migration Plan"; tasks.md 2.4-2.6).
 package schema
 
 import (
@@ -140,7 +141,18 @@ import (
 // survives an index rebuild and follows a continuation; NULL ("not
 // starred") is already the right value for every lineage that predates the
 // column, so this is another ALTER TABLE with no backfill.
-var CurrentVersion = 11
+//
+// v12 adds the durable snapshots table, the record of which transcripts
+// LazyRecall has copied into its own folder (config.Retain). A snapshot
+// exists precisely because the agent's own file may not: Claude Code
+// deletes transcripts after 30 days, and the session row for one already
+// gone is index data that a version bump would discard. The copy is then
+// the last record of that session, so where it is and what it was copied
+// from must survive an index rebuild - the reason the record lives on the
+// durable side, created by annotationDDL alongside lineages/comments/tags
+// rather than on the disposable index. v12 changes nothing the index holds,
+// so it is annotation-only.
+var CurrentVersion = 12
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -231,6 +243,14 @@ CREATE TABLE IF NOT EXISTS tags (
 	PRIMARY KEY (lineage_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+
+CREATE TABLE IF NOT EXISTS snapshots (
+	session_id   TEXT PRIMARY KEY,
+	path         TEXT NOT NULL,
+	source_size  INTEGER NOT NULL,
+	source_mtime INTEGER NOT NULL,
+	copied_at    INTEGER NOT NULL
+);
 `
 
 const metaDDL = `
@@ -342,6 +362,7 @@ ALTER TABLE lineages ADD COLUMN starred_at INTEGER;
 var annotationOnly = map[int]bool{
 	10: true,
 	11: true,
+	12: true,
 }
 
 // Open ensures the database at r.DBPath exists with the current schema,
