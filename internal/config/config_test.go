@@ -612,6 +612,45 @@ func TestInvalidTranscriptModeIsConfigError(t *testing.T) {
 	}
 }
 
+// TestViewerDefaultsToEmpty covers change external-viewer: with no config
+// file, browse.viewer is unset, which is meaningful rather than "not
+// configured" - internal/cli's viewerArgv reads it as "use $PAGER, else
+// less -R" - and an unset key is attributed to the default like every other
+// untouched key.
+func TestViewerDefaultsToEmpty(t *testing.T) {
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Browse.Viewer) != 0 {
+		t.Errorf("Browse.Viewer = %q, want empty", cfg.Browse.Viewer)
+	}
+	if cfg.Origins["browse.viewer"] != OriginDefault {
+		t.Errorf("Origins[browse.viewer] = %q, want %q", cfg.Origins["browse.viewer"], OriginDefault)
+	}
+}
+
+// TestViewerLoadsFromFile covers the configured form: the argv is taken
+// element for element, never re-split (a flag and its value written as
+// separate elements must not be glued together or separated by TOML's own
+// quoting rules), and the key is recorded as file-origin.
+func TestViewerLoadsFromFile(t *testing.T) {
+	path := writeConfig(t, "[browse]\nviewer = [\"glow\", \"-p\"]\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Browse.Viewer, []string{"glow", "-p"}) {
+		t.Errorf("Browse.Viewer = %q, want [glow -p]", cfg.Browse.Viewer)
+	}
+	if cfg.Origins["browse.viewer"] != OriginFile {
+		t.Errorf("Origins[browse.viewer] = %q, want %q", cfg.Origins["browse.viewer"], OriginFile)
+	}
+}
+
 // TestReservedGroupNameIsConfigError covers change
 // group-sessions-in-one-index: "all", "archive" and "unknown" are filter
 // values Filter.Group already gives a fixed meaning, so a configured group
