@@ -574,6 +574,47 @@ func TestConfigShowMarksFileAndDefaultOrigins(t *testing.T) {
 	}
 }
 
+// TestConfigShowRetainKeys covers the [retain] keys in the effective config:
+// all five are printed, the four rule keys carry the retained value, and
+// retain.dir shows the folder the copies will actually go to -
+// profile.DataDir()/snapshots - rather than the empty configured value,
+// which would hide the one thing the reader is looking for.
+func TestConfigShowRetainKeys(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, "data")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("LAZYRECALL_CONFIG", "")
+	t.Setenv("LAZYRECALL_HOME", dataDir)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	runErr := run([]string{"config", "show"})
+	w.Close()
+	os.Stdout = old
+	if runErr != nil {
+		t.Fatalf("run(config show): %v", runErr)
+	}
+	out, _ := io.ReadAll(r)
+	got := string(out)
+
+	for _, want := range []string{
+		"retain.annotated = true    (default)",
+		"retain.sources = []    (default)",
+		"retain.paths = []    (default)",
+		"retain.exclude_paths = []    (default)",
+		"retain.dir = " + filepath.Join(dataDir, "snapshots") + "    (default)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in config show output, got:\n%s", want, got)
+		}
+	}
+}
+
 // TestArchiveCommandAcceptsShortHandle covers change add-archive-facility:
 // `lazyrecall archive SESSION_ID` must accept the short handle exactly like
 // every other command, resolving it through annotate.LineageForIdentifier

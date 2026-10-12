@@ -1028,3 +1028,156 @@ func TestFileSourceTableReplacesNewSessionTemplates(t *testing.T) {
 		t.Errorf("Origins[sources.claude.model] = %q, want %q", got, OriginFile)
 	}
 }
+
+// TestRetainDefaults covers the [retain] table's defaults with no file
+// present: annotated is the one rule on by default (a session the user
+// already named, tagged, commented or starred is worth keeping without
+// further configuration), every other rule keeps nothing, dir is empty
+// ("the default folder", resolved outside config because config cannot
+// import internal/profile), and all five keys are default-attributed.
+func TestRetainDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Retain.Annotated {
+		t.Error("Retain.Annotated = false, want true")
+	}
+	if len(cfg.Retain.Sources) != 0 {
+		t.Errorf("Retain.Sources = %v, want empty", cfg.Retain.Sources)
+	}
+	if len(cfg.Retain.Paths) != 0 {
+		t.Errorf("Retain.Paths = %v, want empty", cfg.Retain.Paths)
+	}
+	if len(cfg.Retain.ExcludePaths) != 0 {
+		t.Errorf("Retain.ExcludePaths = %v, want empty", cfg.Retain.ExcludePaths)
+	}
+	if cfg.Retain.Dir != "" {
+		t.Errorf("Retain.Dir = %q, want empty (the default folder)", cfg.Retain.Dir)
+	}
+	for _, key := range []string{"retain.annotated", "retain.sources", "retain.paths", "retain.exclude_paths", "retain.dir"} {
+		if got := cfg.Origins[key]; got != OriginDefault {
+			t.Errorf("Origins[%s] = %q, want %q", key, got, OriginDefault)
+		}
+	}
+}
+
+// TestRetainFromFile covers a [retain] table setting all five keys: every
+// value is loaded and file-attributed, retain.paths and retain.exclude_paths
+// are expanded with globPaths exactly like hide.paths (home expanded, '**'
+// collapsed to '*'), and retain.dir goes through expandPath.
+func TestRetainFromFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := writeConfig(t, `
+[retain]
+annotated = false
+sources = ["omp", "pi"]
+paths = ["~/personal/**"]
+exclude_paths = ["~/personal/scratch/**"]
+dir = "~/snap"
+`)
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Retain.Annotated {
+		t.Error("annotated = false: Retain.Annotated = true, want false")
+	}
+	if want := []string{"omp", "pi"}; !reflect.DeepEqual(cfg.Retain.Sources, want) {
+		t.Errorf("Retain.Sources = %v, want %v", cfg.Retain.Sources, want)
+	}
+	if want := []string{filepath.Join(home, "personal", "*")}; !reflect.DeepEqual(cfg.Retain.Paths, want) {
+		t.Errorf("Retain.Paths = %v, want %v", cfg.Retain.Paths, want)
+	}
+	if want := []string{filepath.Join(home, "personal", "scratch", "*")}; !reflect.DeepEqual(cfg.Retain.ExcludePaths, want) {
+		t.Errorf("Retain.ExcludePaths = %v, want %v", cfg.Retain.ExcludePaths, want)
+	}
+	if want := filepath.Join(home, "snap"); cfg.Retain.Dir != want {
+		t.Errorf("Retain.Dir = %q, want %q", cfg.Retain.Dir, want)
+	}
+	for _, key := range []string{"retain.annotated", "retain.sources", "retain.paths", "retain.exclude_paths", "retain.dir"} {
+		if got := cfg.Origins[key]; got != OriginFile {
+			t.Errorf("Origins[%s] = %q, want %q", key, got, OriginFile)
+		}
+	}
+}
+
+// TestRetainAnnotatedTrueIsFileAttributed covers the other half of the
+// md.IsDefined dance TestDateHeadersDefaultsTrueAndFileCanTurnItOff
+// documents for browse.date_headers: `annotated = true` is the same value as
+// the default, but must still be attributed to the file, and an unrelated
+// [retain] key must leave annotated's default (and origin) untouched.
+func TestRetainAnnotatedTrueIsFileAttributed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := writeConfig(t, "[retain]\nannotated = true\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Retain.Annotated {
+		t.Error("annotated = true: Retain.Annotated = false, want true")
+	}
+	if got := cfg.Origins["retain.annotated"]; got != OriginFile {
+		t.Errorf("Origins[retain.annotated] = %q, want %q", got, OriginFile)
+	}
+
+	path = writeConfig(t, "[retain]\nsources = [\"pi\"]\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Retain.Annotated {
+		t.Error("[retain] with sources only: Retain.Annotated = false, want true")
+	}
+	if got := cfg.Origins["retain.annotated"]; got != OriginDefault {
+		t.Errorf("Origins[retain.annotated] = %q, want %q", got, OriginDefault)
+	}
+}
+
+// TestRetainSourceWithoutTranscriptIsConfigError covers the one retain rule
+// that can name something lazyrecall cannot keep: hermes keeps its sessions
+// in a database, not in a transcript file, and lazyrecall never copies
+// another tool's database. The error is asserted in full - file, key,
+// offending name and the three usable sources - because the point of the
+// check is that the mistake is explained, not just refused.
+func TestRetainSourceWithoutTranscriptIsConfigError(t *testing.T) {
+	path := writeConfig(t, "[retain]\nsources = [\"hermes\"]\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected a config error for a source with no transcript file, got nil")
+	}
+	want := fmt.Sprintf("config %s: retain.sources: %q keeps no transcript file lazyrecall can copy (only claude, pi and omp do)", path, "hermes")
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestRetainSourcesAcceptsEveryTranscriptSource covers the three sources
+// that do keep a transcript file lazyrecall can copy; each loads without
+// error, the same shape TestDefaultGroupAcceptsEveryValidValue takes for
+// browse.default_group's valid values.
+func TestRetainSourcesAcceptsEveryTranscriptSource(t *testing.T) {
+	for _, name := range []string{"claude", "pi", "omp"} {
+		path := writeConfig(t, fmt.Sprintf("[retain]\nsources = [%q]\n", name))
+		t.Setenv("LAZYRECALL_CONFIG", path)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("sources = [%q]: unexpected error: %v", name, err)
+		}
+		if want := []string{name}; !reflect.DeepEqual(cfg.Retain.Sources, want) {
+			t.Errorf("sources = [%q]: Retain.Sources = %v, want %v", name, cfg.Retain.Sources, want)
+		}
+	}
+}

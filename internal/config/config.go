@@ -127,6 +127,46 @@ type Browse struct {
 	DateHeaders bool `toml:"date_headers"`
 }
 
+// Retain is the rules that say which transcripts lazyrecall keeps its own
+// copy of. Agents delete old transcripts (Claude Code's cleanupPeriodDays,
+// for one) and with them the record of a session worth coming back to, so
+// lazyrecall can snapshot the ones worth keeping. This is configuration
+// only: nothing here copies, reads or restores anything by itself.
+type Retain struct {
+	// Annotated keeps every session whose lineage has been given a custom
+	// name, a tag, a comment or a star - the sessions a user has already
+	// said are worth keeping. Default true, so like browse.date_headers it
+	// is read with md.IsDefined rather than trusting the decoded bool: a
+	// file that never mentions it must still end up true, and a decoded
+	// false cannot be told apart from an explicit annotated = false.
+	Annotated bool `toml:"annotated"`
+
+	// Sources keeps every session of these sources, by name. Only the
+	// transcript-file sources (claude, pi, omp) can be kept: the
+	// database-backed ones (hermes, goose, opencode, kilo, antigravity)
+	// have no transcript file to copy, and lazyrecall never copies another
+	// tool's database. Naming one of those is a load error, not a rule that
+	// silently keeps nothing.
+	Sources []string `toml:"sources"`
+
+	// Paths keeps every session whose cwd matches one of these patterns,
+	// expanded and normalised with globPaths exactly like hide.paths -
+	// SQLite GLOB's '*' already crosses '/', so '**' doubles nothing.
+	Paths []string `toml:"paths"`
+
+	// ExcludePaths never keeps a session whose cwd matches one of these,
+	// whatever else matched. Same expansion as Paths. Ordering matters:
+	// exclusion is decided last, so a path listed here wins over an
+	// annotated session or a matching Sources entry.
+	ExcludePaths []string `toml:"exclude_paths"`
+
+	// Dir is where the copies go. Empty means the default,
+	// profile.DataDir()/snapshots - resolved by whoever copies, not here,
+	// because internal/config cannot import internal/profile (profile
+	// imports config). A set value goes through expandPath.
+	Dir string `toml:"dir"`
+}
+
 // Group is one configured way of sorting sessions by working directory,
 // e.g. "work" claiming every session under ~/code and ~/work. Groups are
 // resolved at query time, the same way hide.paths is (internal/search):
@@ -160,6 +200,7 @@ type Config struct {
 	Sources map[string]Source `toml:"sources"`
 	Hide    Hide              `toml:"hide"`
 	Browse  Browse            `toml:"browse"`
+	Retain  Retain            `toml:"retain"`
 
 	// Groups is ordered, not a map: a session that matches more than one
 	// group's paths is resolved by longest-prefix match regardless of
@@ -219,6 +260,7 @@ type fileConfig struct {
 	Sources map[string]Source    `toml:"sources"`
 	Hide    Hide                 `toml:"hide"`
 	Browse  Browse               `toml:"browse"`
+	Retain  Retain               `toml:"retain"`
 	Groups  map[string]groupFile `toml:"groups"`
 	Labels  map[string]string    `toml:"labels"`
 }
@@ -339,6 +381,16 @@ func defaultConfig() Config {
 			Paths:          []string{},
 		},
 		Browse: Browse{ShowArchived: false, DefaultGroup: "", Transcript: "clean", DateHeaders: true},
+		Retain: Retain{
+			// Annotated is the one retain rule that is on by default: a
+			// session the user named, tagged, commented or starred has
+			// already been marked worth keeping, so it is kept without
+			// further configuration. The rest default to keeping nothing.
+			Annotated:    true,
+			Sources:      []string{},
+			Paths:        []string{},
+			ExcludePaths: []string{},
+		},
 		// Groups is nil by default: no config means no groups, and every
 		// session resolves to Unknown (which the browser and CLI treat as
 		// "today's behavior", not as a new state to display).
@@ -360,6 +412,11 @@ func defaultOrigins(sources map[string]Source) map[string]Origin {
 		"browse.default_group": OriginDefault,
 		"browse.transcript":    OriginDefault,
 		"browse.date_headers":  OriginDefault,
+		"retain.annotated":     OriginDefault,
+		"retain.sources":       OriginDefault,
+		"retain.paths":         OriginDefault,
+		"retain.exclude_paths": OriginDefault,
+		"retain.dir":           OriginDefault,
 		"labels":               OriginDefault,
 	}
 	for name := range sources {
@@ -456,6 +513,29 @@ func Load() (Config, error) {
 	if md.IsDefined("browse", "date_headers") {
 		cfg.Browse.DateHeaders = file.Browse.DateHeaders
 		cfg.Origins["browse.date_headers"] = OriginFile
+	}
+	if md.IsDefined("retain", "annotated") {
+		cfg.Retain.Annotated = file.Retain.Annotated
+		cfg.Origins["retain.annotated"] = OriginFile
+	}
+	if md.IsDefined("retain", "sources") {
+		if err := validateRetainSources(file.Retain.Sources); err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
+		cfg.Retain.Sources = file.Retain.Sources
+		cfg.Origins["retain.sources"] = OriginFile
+	}
+	if md.IsDefined("retain", "paths") {
+		cfg.Retain.Paths = globPaths(file.Retain.Paths)
+		cfg.Origins["retain.paths"] = OriginFile
+	}
+	if md.IsDefined("retain", "exclude_paths") {
+		cfg.Retain.ExcludePaths = globPaths(file.Retain.ExcludePaths)
+		cfg.Origins["retain.exclude_paths"] = OriginFile
+	}
+	if md.IsDefined("retain", "dir") {
+		cfg.Retain.Dir = expandPath(file.Retain.Dir)
+		cfg.Origins["retain.dir"] = OriginFile
 	}
 
 	for name, s := range file.Sources {
@@ -631,6 +711,24 @@ func validateTranscriptMode(value string) error {
 		return nil
 	}
 	return fmt.Errorf("browse.transcript %q: valid values are: clean, full", value)
+}
+
+// validateRetainSources checks every retain.sources entry against the
+// sources that actually have a transcript file lazyrecall can copy: claude,
+// pi and omp. The database-backed sources (hermes, goose, opencode, kilo,
+// antigravity) are rejected rather than accepted-and-ignored: a rule that
+// silently keeps nothing is a harder mistake to notice than an error naming
+// the offending source, the same choice validateDefaultGroup and
+// validateTranscriptMode make for their keys.
+func validateRetainSources(sources []string) error {
+	for _, name := range sources {
+		switch name {
+		case "claude", "pi", "omp":
+			continue
+		}
+		return fmt.Errorf("retain.sources: %q keeps no transcript file lazyrecall can copy (only claude, pi and omp do)", name)
+	}
+	return nil
 }
 
 // Set records that the caller overrode one dotted key and marks where that
