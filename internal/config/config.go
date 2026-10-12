@@ -125,6 +125,17 @@ type Browse struct {
 	// cannot be told apart from an explicit `date_headers = false` on its
 	// own.
 	DateHeaders bool `toml:"date_headers"`
+
+	// Viewer is the argv of the program the `v` key opens a session's
+	// conversation in (change external-viewer): the command part is used
+	// as given, never through a shell, and {file} in any element is
+	// replaced with the temporary Markdown file's path - when no element
+	// carries it, the path is appended. Empty means "whatever the user
+	// already reads Markdown with": $PAGER if set, else less -R. The
+	// fallback chain lives in internal/cli (viewerArgv), because it needs
+	// the environment and this package deliberately holds only what a file
+	// can say.
+	Viewer []string `toml:"viewer"`
 }
 
 // Retain is the rules that say which transcripts lazyrecall keeps its own
@@ -417,6 +428,7 @@ func defaultOrigins(sources map[string]Source) map[string]Origin {
 		"retain.paths":         OriginDefault,
 		"retain.exclude_paths": OriginDefault,
 		"retain.dir":           OriginDefault,
+		"browse.viewer":        OriginDefault,
 		"labels":               OriginDefault,
 	}
 	for name := range sources {
@@ -536,6 +548,10 @@ func Load() (Config, error) {
 	if md.IsDefined("retain", "dir") {
 		cfg.Retain.Dir = expandPath(file.Retain.Dir)
 		cfg.Origins["retain.dir"] = OriginFile
+	}
+	if md.IsDefined("browse", "viewer") {
+		cfg.Browse.Viewer = file.Browse.Viewer
+		cfg.Origins["browse.viewer"] = OriginFile
 	}
 
 	for name, s := range file.Sources {

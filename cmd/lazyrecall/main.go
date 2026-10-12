@@ -1555,6 +1555,7 @@ func showConfig(cfg config.Config) error {
 		"retain.paths":         cfg.Retain.Paths,
 		"retain.exclude_paths": cfg.Retain.ExcludePaths,
 		"retain.dir":           retain.DirFor(cfg.Retain),
+		"browse.viewer":        cfg.Browse.Viewer,
 		"labels":               cfg.Labels,
 	}
 	names := make([]string, 0, len(cfg.Sources))
@@ -1724,6 +1725,11 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # default_group = ""
 # transcript = "clean"
 # date_headers = true
+# The program v opens the selected session's conversation in, as an argv
+# - never through a shell. {file} in any element is replaced with the
+# temporary Markdown file's path; with no {file} the path is appended.
+# Unset means $PAGER if the environment sets it, else less -R.
+# viewer = ["glow", "-p"]          # or ["leaf"], ["bat", "-l", "md"], ["nvim", "-R"]
 `
 
 // outputItems writes a listing either as JSON - an envelope naming the
@@ -1863,6 +1869,7 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 		ArchiveColor:  cfg.ArchiveColor,
 		UnknownColor:  cfg.UnknownColor,
 		Transcript:    cfg.Browse.Transcript,
+		Viewer:        cfg.Browse.Viewer,
 		Installs:      discoverInstallsForBrowser,
 		InstallLabels: labels,
 	})

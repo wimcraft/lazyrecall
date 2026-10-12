@@ -110,6 +110,12 @@ type BrowserOptions struct {
 	// "clean", the config default, rather than requiring every existing
 	// caller to spell it out.
 	Transcript string
+	// Viewer is the argv of the program the `v` key opens a session's
+	// conversation in (config.Config.Browse.Viewer; change
+	// external-viewer). Empty - the zero value, and what every test leaves
+	// it at - means the viewerArgv fallback chain: $PAGER if set, else less
+	// -R.
+	Viewer []string
 	// DateHeaders is cfg.Browse.date_headers - whether the Sessions panel
 	// draws its "── Today ──" / "── Yesterday ──" / ... separator rows
 	// (change date-separator-rows). It defaults to false here, the ordinary
@@ -541,6 +547,12 @@ type browseModel struct {
 	// which session is selected, or the search phrase, it survives every
 	// one of those changing.
 	transcriptMode transcriptMode
+	// viewer is BrowserOptions.Viewer (config's browse.viewer): the argv
+	// the `v` key runs to show the temporary Markdown file (change
+	// external-viewer). Empty is meaningful rather than "not configured" -
+	// it selects viewerArgv's $PAGER / less -R fallback - so it is kept
+	// as-is, with no default filled in here.
+	viewer []string
 
 	mode       inputMode
 	input      textinput.Model
@@ -604,6 +616,7 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 		client:         opts.Client,
 		input:          textinput.New(),
 		transcriptMode: transcriptModeFromConfig(opts.Transcript),
+		viewer:         opts.Viewer,
 		dateHeaders:    opts.DateHeaders,
 	}
 	// Command-line filters open as the corresponding panels' selections, so
@@ -1093,6 +1106,17 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadAll()
 		return m, nil
 
+	case viewerDoneMsg:
+		// The viewer ran and exited; the temporary Markdown file is already
+		// gone (removed by the callback that produced this message). A
+		// successful exit says nothing the user does not already know, so
+		// only a failure - the viewer could not start, or exited non-zero -
+		// is worth the footer line.
+		if msg.err != nil {
+			m.notice = "view: " + msg.err.Error()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.mode != modeNone {
 			return m.updateInputMode(msg)
@@ -1230,6 +1254,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleStar()
 	case "z":
 		m.toggleZoom()
+	case "v":
+		return m.openViewer()
 	case ".":
 		m.toggleShowAll()
 	}
@@ -1299,6 +1325,8 @@ func (m *browseModel) handleZoomedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "z":
 		m.unzoom()
+	case "v":
+		return m.openViewer()
 	}
 	return m, nil
 }
@@ -3438,6 +3466,7 @@ var browseActions = []browseAction{
 	{key: "n/N", label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
 	{key: "t", label: "clean/full", help: "on the Transcript tab, toggle between the clean question/answer view and the full technical transcript", panels: []panelID{panelSessions, panelDetail}},
 	{key: "z", label: "zoom", help: "zoom the detail pane to the whole frame, or back (esc also leaves)", panels: []panelID{panelSessions, panelDetail}, footer: true},
+	{key: "v", label: "view", help: "open the selected session's conversation as Markdown in the viewer (browse.viewer, else $PAGER, else less)", panels: []panelID{panelSessions, panelDetail}, footer: true},
 	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
 	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
 	{key: "x", label: "menu", help: "action menu for the focused panel - j/k or ↑/↓ move, enter applies, esc closes, / narrows by typing", footer: true},
