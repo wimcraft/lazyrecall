@@ -3878,7 +3878,26 @@ func renderItemTranscriptMode(c *conversationCache, it search.Item, phrase strin
 		}
 		fmt.Fprintf(&b, "%s\n", turnHeader(t, opts))
 		line++
-		for _, l := range transcriptBody(t, opts) {
+		body := transcriptBody(t, opts)
+		if t.Kind == transcript.KindAssistantText && opts.Style && len(words) == 0 {
+			// The agent writes Markdown, so its reply is restyled here -
+			// but only when there is no active phrase. Every other turn,
+			// an unstyled render, and any turn at all under an active
+			// search keep exactly today's output: hits and highlighting
+			// are computed on the plain text below, and a line they
+			// cannot see (markers already turned into escape sequences)
+			// would be a line that never matches.
+			body = styleMarkdownLines(body, opts.Style)
+		}
+		if note := truncationNote(t, opts); note != "" {
+			// The note is lazyrecall's own sentence, not the agent's text,
+			// so it rejoins the body after the styler has run and never
+			// passes through it. It rejoins before the hit scan, though,
+			// exactly where it always sat: a phrase that names the note is
+			// still a phrase this line carries.
+			body = append(body, note)
+		}
+		for _, l := range body {
 			if containsAnyFold(l, words) {
 				c.hits = append(c.hits, line)
 			}
@@ -3984,13 +4003,13 @@ func codeBlockLines(blocks []CodeBlock, opts RenderOptions) []string {
 // with nothing between them, because nothing user-visible sits between
 // them either way.
 //
-// A merged block's Truncated is set if any part of it was: transcriptBody
+// A merged block's Truncated is set if any part of it was: the turn loop
 // appends one "... turn truncated" note at the end of the whole block
 // rather than marking exactly which paragraph ran over the per-turn byte
 // budget - truncation is rare enough (DefaultConversationLimits.
 // MaxTurnBytes is 4000) that a block-level note is enough to say "there is
-// more here than is shown," without teaching transcriptBody to interleave
-// per-paragraph markers for a case this uncommon.
+// more here than is shown," without interleaving per-paragraph markers for
+// a case this uncommon.
 func cleanTranscriptTurns(turns []transcript.Turn) []transcript.Turn {
 	out := make([]transcript.Turn, 0, len(turns))
 	for _, t := range turns {
@@ -4045,11 +4064,19 @@ func transcriptBody(t transcript.Turn, opts RenderOptions) []string {
 	if t.Text == "" {
 		return nil
 	}
-	lines := wrapToWidth(t.Text, opts.Width-2)
-	if t.Truncated {
-		lines = append(lines, style("... turn truncated", ansiDim, opts.Style))
+	return wrapToWidth(t.Text, opts.Width-2)
+}
+
+// truncationNote is the dim note that closes a turn the read budget cut
+// short. It is kept out of transcriptBody rather than returned with the
+// body lines the way it used to be, so that the Markdown styler never sees
+// it: the note is lazyrecall's own sentence, not the agent's text, and a
+// styler asked to interpret it could only get it wrong.
+func truncationNote(t transcript.Turn, opts RenderOptions) string {
+	if t.Text == "" || !t.Truncated {
+		return ""
 	}
-	return lines
+	return style("... turn truncated", ansiDim, opts.Style)
 }
 
 // highlightWords marks every case-insensitive occurrence of any of words in
