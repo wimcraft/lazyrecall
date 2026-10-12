@@ -271,11 +271,15 @@ type detailTab int
 // asked it, what actually happened, and what you wrote down about it.
 // Transcript sits next to Prompts because they answer the same question at
 // two depths - Prompts to recognise the session, Transcript to see where it
-// was left.
+// was left. References follows the Transcript for the same reason: it lists
+// what the conversation pointed at, which is the transcript's own content
+// read a second way, and it is not something written down about the session
+// the way a comment is.
 const (
 	tabDetail detailTab = iota
 	tabPrompts
 	tabTranscript
+	tabReferences
 	tabComments
 	numDetailTabs
 )
@@ -286,6 +290,8 @@ func (t detailTab) title() string {
 		return "Prompts"
 	case tabTranscript:
 		return "Transcript"
+	case tabReferences:
+		return "References"
 	case tabComments:
 		return "Comments"
 	}
@@ -3173,7 +3179,7 @@ func (m browseModel) detailPanel(g geometry) panelBox {
 
 // tabStrip is the tab row, drawn into the detail panel's top border. The
 // active tab is bold; the others are dim, so the strip reads as one
-// control rather than three titles.
+// control rather than a row of separate titles.
 func (m browseModel) tabStrip() string {
 	parts := make([]string, 0, numDetailTabs)
 	for t := detailTab(0); t < numDetailTabs; t++ {
@@ -3218,6 +3224,8 @@ func (m browseModel) detailContent(opts RenderOptions) string {
 		return renderItemPrompts(m.db, *it, opts)
 	case tabTranscript:
 		return renderItemTranscriptMode(m.convo, *it, m.transcriptPhrase(), m.installFor, m.transcriptMode, opts)
+	case tabReferences:
+		return renderItemReferences(m.convo, *it, m.installFor, opts)
 	case tabComments:
 		return renderItemComments(m.db, *it, opts)
 	}
@@ -3760,6 +3768,43 @@ func (c *conversationCache) load(it search.Item, installFor func(search.Item) (p
 	c.turns, c.dropped, c.err = reader.Conversation(p, it.SourceSessionID, transcript.DefaultConversationLimits)
 }
 
+// conversationGuard reads the session's conversation into c and reports
+// whether there is one to render, returning the dim message that stands in
+// for it when there is not. Every reason a conversation cannot be shown has
+// its own wording, and they are worth telling apart: a source that cannot
+// be decoded at all is a fact about the agent, a missing path is something a
+// refresh can fix, and an empty read is neither.
+//
+// It is shared by the Transcript and References tabs, which draw the same
+// conversation two ways, so that the two can never disagree about why there
+// is nothing to show - and, more importantly, so that both read through the
+// same conversationCache and switching between them never goes to disk a
+// second time.
+func conversationGuard(c *conversationCache, it search.Item, installFor func(search.Item) (profile.Profile, error), opts RenderOptions) (string, bool) {
+	c.load(it, installFor)
+
+	if c.err != nil {
+		// A transcript the index has a path for but that cannot be read is
+		// worth naming: the usual cause is the source tool having cleaned
+		// it up (Claude Code's cleanupPeriodDays) since the last refresh.
+		if os.IsNotExist(c.err) {
+			return style("The transcript file is gone - the agent cleaned it up since the last refresh.", ansiDim, opts.Style), false
+		}
+		return "transcript: " + c.err.Error(), false
+	}
+	if c.source == sourceUnreadable {
+		return style("This agent stores its conversations in a format lazyrecall cannot decode, so there is nothing to read here. Prompts still shows what you asked.", ansiDim, opts.Style), false
+	}
+	if c.source == sourceKeepsTranscript && (it.TranscriptPath == nil || *it.TranscriptPath == "") {
+		return style("The index has no transcript file recorded for this session. A refresh (R) may pick one up.", ansiDim, opts.Style), false
+	}
+	if len(c.turns) == 0 {
+		return style("No readable turns in this transcript.", ansiDim, opts.Style), false
+	}
+
+	return "", true
+}
+
 // renderItemTranscript renders the Transcript tab in full mode: every turn
 // Conversation kept, exactly as the tab looked before clean mode existed.
 // It is a thin wrapper around renderItemTranscriptMode rather than mode
@@ -3778,25 +3823,8 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, i
 // "is this the session I meant" without having to resume it and find out -
 // full mode as the technical record, clean mode as question/answer.
 func renderItemTranscriptMode(c *conversationCache, it search.Item, phrase string, installFor func(search.Item) (profile.Profile, error), mode transcriptMode, opts RenderOptions) string {
-	c.load(it, installFor)
-
-	if c.err != nil {
-		// A transcript the index has a path for but that cannot be read is
-		// worth naming: the usual cause is the source tool having cleaned
-		// it up (Claude Code's cleanupPeriodDays) since the last refresh.
-		if os.IsNotExist(c.err) {
-			return style("The transcript file is gone - the agent cleaned it up since the last refresh.", ansiDim, opts.Style)
-		}
-		return "transcript: " + c.err.Error()
-	}
-	if c.source == sourceUnreadable {
-		return style("This agent stores its conversations in a format lazyrecall cannot decode, so there is nothing to read here. Prompts still shows what you asked.", ansiDim, opts.Style)
-	}
-	if c.source == sourceKeepsTranscript && (it.TranscriptPath == nil || *it.TranscriptPath == "") {
-		return style("The index has no transcript file recorded for this session. A refresh (R) may pick one up.", ansiDim, opts.Style)
-	}
-	if len(c.turns) == 0 {
-		return style("No readable turns in this transcript.", ansiDim, opts.Style)
+	if msg, ok := conversationGuard(c, it, installFor, opts); !ok {
+		return msg
 	}
 
 	// turns is what gets rendered below; c.turns itself is left untouched
@@ -3859,6 +3887,83 @@ func renderItemTranscriptMode(c *conversationCache, it search.Item, phrase strin
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderItemReferences renders the References tab: the files, links and code
+// blocks ExtractReferences found in the same conversation the Transcript tab
+// shows, in its own first-seen order. It reads through the same
+// conversationCache, so switching between the two tabs never reads the file
+// twice.
+//
+// The three lists are independent - a session may have any combination of
+// them, including none - so each section appears only when it has something
+// in it, and the reader is never shown "Links (0)". For the same reason an
+// empty conversation is one sentence rather than three empty headings.
+func renderItemReferences(c *conversationCache, it search.Item, installFor func(search.Item) (profile.Profile, error), opts RenderOptions) string {
+	if msg, ok := conversationGuard(c, it, installFor, opts); !ok {
+		return msg
+	}
+
+	refs := ExtractReferences(c.turns)
+	if len(refs.Files) == 0 && len(refs.URLs) == 0 && len(refs.Code) == 0 {
+		return style("No files, links or code blocks in this conversation.", ansiDim, opts.Style)
+	}
+
+	var sections []string
+	if len(refs.Files) > 0 {
+		sections = append(sections, referenceSection("Files", len(refs.Files), refs.Files, opts))
+	}
+	if len(refs.URLs) > 0 {
+		sections = append(sections, referenceSection("Links", len(refs.URLs), refs.URLs, opts))
+	}
+	if len(refs.Code) > 0 {
+		sections = append(sections, referenceSection("Code", len(refs.Code), codeBlockLines(refs.Code, opts), opts))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+// referenceSection renders one titled list: the bold heading with its count,
+// then each line indented two spaces the way the Transcript tab indents a
+// turn's body. The count is in the heading because "how many files did this
+// session touch" is the first thing the list is read for, and counting rows
+// is what a terminal cannot do for you.
+//
+// An empty line is left empty rather than indented: the indent marks content,
+// and trailing whitespace on a blank line marks nothing.
+func referenceSection(title string, count int, lines []string, opts RenderOptions) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", style(fmt.Sprintf("%s (%d)", title, count), ansiBold, opts.Style))
+	for _, line := range lines {
+		if line == "" {
+			b.WriteString("\n")
+			continue
+		}
+		fmt.Fprintf(&b, "  %s\n", line)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// codeBlockLines renders code blocks as the lines the References tab shows:
+// a dim "── go ──" header naming the fence's language (or "code" when it
+// carries none, which is not the same as a language named "code"), then the
+// body itself wrapped to the pane with room for the section's two-space
+// indent left over. Consecutive blocks are separated by one blank line,
+// because a header directly under another block's last line reads as part of
+// that block.
+func codeBlockLines(blocks []CodeBlock, opts RenderOptions) []string {
+	var out []string
+	for i, block := range blocks {
+		if i > 0 {
+			out = append(out, "")
+		}
+		lang := block.Lang
+		if lang == "" {
+			lang = "code"
+		}
+		out = append(out, style("── "+lang+" ──", ansiDim, opts.Style))
+		out = append(out, wrapToWidth(block.Body, opts.Width-4)...)
+	}
+	return out
 }
 
 // cleanTranscriptTurns is what clean mode renders in place of the turns
