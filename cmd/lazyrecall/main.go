@@ -1522,6 +1522,11 @@ func showConfig(cfg config.Config) error {
 		"browse.default_group": cfg.Browse.DefaultGroup,
 		"browse.transcript":    cfg.Browse.Transcript,
 		"browse.date_headers":  cfg.Browse.DateHeaders,
+		"retain.annotated":     cfg.Retain.Annotated,
+		"retain.sources":       cfg.Retain.Sources,
+		"retain.paths":         cfg.Retain.Paths,
+		"retain.exclude_paths": cfg.Retain.ExcludePaths,
+		"retain.dir":           retainDir(cfg.Retain.Dir),
 		"labels":               cfg.Labels,
 	}
 	names := make([]string, 0, len(cfg.Sources))
@@ -1579,6 +1584,19 @@ func showConfig(cfg config.Config) error {
 		fmt.Printf("%s = %v    (%s)\n", k, values[k], cfg.Origins[k])
 	}
 	return nil
+}
+
+// retainDir is the effective snapshot folder for `config show`: retain.dir
+// when configured, else the default the snapshot writer will use -
+// profile.DataDir()/snapshots. Resolved here, not in config, because
+// internal/config cannot import internal/profile (profile imports config),
+// and showing the configured "" would hide the one thing the reader wants
+// to know: where the copies actually go.
+func retainDir(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return filepath.Join(profile.DataDir(), "snapshots")
 }
 
 // defaultConfigFile is what `lazyrecall config init` writes: the built-in
@@ -1645,6 +1663,16 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # session. A dangling session is by definition a short one - the exchange
 # stopped mid-turn - so a threshold that hides short sessions also hides
 # real problems from the review listing.
+
+# Retention: lazyrecall keeps its own copy of the transcripts worth keeping,
+# because agents delete old ones (Claude Code: cleanupPeriodDays). Only
+# claude, pi and omp keep transcript files that can be copied.
+# [retain]
+# annotated = true          # named, tagged, commented or starred sessions
+# sources = []              # e.g. ["omp"]: every session of these sources
+# paths = []                # e.g. ["~/personal/**"]: every session under these folders
+# exclude_paths = []        # never kept, whatever else matched
+# dir = ""                  # default: ~/.lazyrecall/snapshots
 
 # Groups sort sessions by working directory, at query time - editing this
 # section regroups every session immediately, with no refresh needed. A
