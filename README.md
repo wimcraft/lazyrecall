@@ -79,6 +79,18 @@ Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) from
 
 A session carrying comments shows a small `✎N` marker on its row (e.g. `✎2` for two comments) - a hint that there is more to read on the Detail or Comments tab. On a row too narrow for everything, the topic is shortened first to keep it; the marker only gives way once keeping it would leave too little of the topic to recognize the session by.
 
+## Use it from Claude Code
+
+`docs/skills/lazyrecall` is a [Claude Code skill](https://code.claude.com/docs/en/skills): a `SKILL.md` that teaches Claude to answer "did we solve this before?", "find the session where I set up X", "what did we decide about Y last month" by searching your sessions with `lazyrecall search --json` and reading the best hit with `lazyrecall export --clean`. It is documentation only - the commands it runs are the ones documented above.
+
+Copy the folder into your Claude Code skills directory:
+
+```sh
+cp -r docs/skills/lazyrecall ~/.claude/skills/
+```
+
+The same works for a `CLAUDE_CONFIG_DIR` install, e.g. `~/.claude-personal/skills/`. Then ask Claude in any project "did we solve X before?" - it searches your history instead of guessing, quotes the session it found, and hands you the `lazyrecall resume <id>` to run. The skill is read-only with respect to your sessions: it never resumes, stars, tags, archives or comments on anything, and it never turns redaction off.
+
 ## Key bindings
 
 | Key | Action |
