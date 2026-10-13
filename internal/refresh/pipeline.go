@@ -193,11 +193,21 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 	// forever (change fix-resume-session-identity).
 	cursorSourceID := s.SourceSessionID
 
+	// A session recovered from LazyRecall's own snapshot copy (T27) reads
+	// its bytes from ReadFrom while TranscriptPath - what gets stored, and
+	// what a resume later restores the copy to (T19) - stays the agent's
+	// own path. Every read below therefore goes through readPath, never
+	// d.TranscriptPath directly.
+	readPath := d.TranscriptPath
+	if d.ReadFrom != "" {
+		readPath = d.ReadFrom
+	}
+
 	rewritten := false
 	fromOffset := int64(0)
 	if cur.ByteOffset != nil {
 		fromOffset = *cur.ByteOffset
-		rewritten = transcriptRewritten(cur, d.FileSize, d.TranscriptPath)
+		rewritten = transcriptRewritten(cur, d.FileSize, readPath)
 		if rewritten {
 			fromOffset = 0 // task 6.2: rewrite detected, re-read in full
 		}
@@ -208,7 +218,7 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 		return s, nil, nil, false
 	}
 
-	res, err := transcript.Scan(d.TranscriptPath, fromOffset, vocab)
+	res, err := transcript.Scan(readPath, fromOffset, vocab)
 	if err != nil {
 		// Can't read it this pass (e.g. transient permission error, or the
 		// agent rewrote it between stat and open). Leave everything as it
@@ -380,7 +390,7 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 
 	s.TranscriptPath = &d.TranscriptPath
 
-	hash, _ := leadingBytesHash(d.TranscriptPath, 256)
+	hash, _ := leadingBytesHash(readPath, 256)
 	return s, cursorRecord(s.Source, cursorSourceID, res.EndOffset, d.FileSize, hash), res.Prompts, rewritten
 
 }

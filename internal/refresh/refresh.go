@@ -154,6 +154,13 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
+	// Every snapshot that still remembers the agent's own path, loaded once
+	// for the whole pass: each (source, install) below offers its own missing
+	// sessions back through the normal pipeline from these copies (T27).
+	snaps, err := r.loadSnapshots()
+	if err != nil {
+		return Summary{}, err
+	}
 	existing, err := r.loadExistingSessions()
 	if err != nil {
 		return Summary{}, err
@@ -201,6 +208,12 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 				continue
 			}
 			status.Available = true
+
+			// Sessions whose agent transcript is gone but whose copy
+			// LazyRecall kept (T27) join the discovered slice here, before
+			// anything downstream reads it - bySourceID, the per-session
+			// loop, and tier2ForSource all treat them like any other session.
+			discovered = append(discovered, snapshotDiscovered(a.Name(), p.Name, snaps, discovered)...)
 
 			bySourceID := map[string]session.Session{}
 			for _, d := range discovered {
