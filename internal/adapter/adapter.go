@@ -24,6 +24,16 @@ type Discovered struct {
 	// (hermes), which must fill Session completely themselves.
 	TranscriptPath string
 
+	// ReadFrom, when non-empty, is the file refresh actually reads the
+	// transcript's bytes from - LazyRecall's own snapshot copy of a
+	// transcript whose agent file is gone (internal/retain's snapshots
+	// table). TranscriptPath still holds the agent's own path and is what
+	// gets stored on the session, so a re-indexed session looks exactly
+	// like any other session whose transcript was deleted but whose copy
+	// survives (internal/search redirects such a row at its copy):
+	// FileSize is then ReadFrom's size, not TranscriptPath's.
+	ReadFrom string
+
 	// FileSize is the transcript's current size in bytes, used by the
 	// refresh pipeline's rewrite-detection (task 6.2). Meaningless when
 	// TranscriptPath is empty.
