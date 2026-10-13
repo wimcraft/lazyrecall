@@ -574,6 +574,48 @@ func TestConfigShowMarksFileAndDefaultOrigins(t *testing.T) {
 	}
 }
 
+// TestConfigShowKeysOnlyListsReboundActions covers the [keys] rows of
+// `config show`: a rebound action is printed with its new key and the file
+// origin, while every action the file left alone stays out of the output -
+// the same rule groups follow, so the twenty-odd untouched defaults cannot
+// bury the one binding the reader came to see.
+func TestConfigShowKeysOnlyListsReboundActions(t *testing.T) {
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".config", "lazyrecall")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("[keys]\nquit = \"Q\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("LAZYRECALL_CONFIG", "")
+	t.Setenv("LAZYRECALL_PROFILE", "")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	runErr := run([]string{"config", "show"})
+	w.Close()
+	os.Stdout = old
+	if runErr != nil {
+		t.Fatalf("run(config show): %v", runErr)
+	}
+	out, _ := io.ReadAll(r)
+	got := string(out)
+
+	if !strings.Contains(got, "keys.quit = Q    (file)") {
+		t.Errorf("expected the rebound action attributed to the file, got:\n%s", got)
+	}
+	if strings.Contains(got, "keys.archive =") {
+		t.Errorf("expected an untouched action to be left out of config show, got:\n%s", got)
+	}
+}
+
 // TestConfigShowRetainKeys covers the [retain] keys in the effective config:
 // all five are printed, the four rule keys carry the retained value, and
 // retain.dir shows the folder the copies will actually go to -

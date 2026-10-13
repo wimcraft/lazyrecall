@@ -1603,6 +1603,15 @@ func showConfig(cfg config.Config) error {
 	if _, ok := cfg.Origins["groups.unknown.color"]; ok {
 		values["groups.unknown.color"] = cfg.UnknownColor
 	}
+	// A [keys] binding is shown only when the file set it, exactly like a
+	// group above: the other twenty-odd actions keep their defaults and
+	// would be twenty-odd rows of noise identical to "not configured",
+	// hiding the one binding the reader came to see.
+	for _, a := range config.KeyActions {
+		if cfg.Origins["keys."+a.Name] == config.OriginFile {
+			values["keys."+a.Name] = cfg.Keys[a.Name]
+		}
+	}
 
 	keys := make([]string, 0, len(values))
 	for k := range values {
@@ -1730,6 +1739,14 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # temporary Markdown file's path; with no {file} the path is appended.
 # Unset means $PAGER if the environment sets it, else less -R.
 # viewer = ["glow", "-p"]          # or ["leaf"], ["bat", "-l", "md"], ["nvim", "-R"]
+
+# Single-key actions in the browser can be rebound. Navigation (j k g G H J K L,
+# the digits) and the control keys (Ctrl-C, arrows, Enter, Esc, Tab) cannot be.
+# A key can belong to only one action, so the two archive keys swap together.
+# [keys]
+# archive = "A"
+# archive_shown = "a"
+# quit = "Q"
 `
 
 // outputItems writes a listing either as JSON - an envelope naming the

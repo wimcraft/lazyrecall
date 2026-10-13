@@ -1220,3 +1220,115 @@ func TestRetainSourcesAcceptsEveryTranscriptSource(t *testing.T) {
 		}
 	}
 }
+
+// TestKeysDefaultsWhenNoFileExists covers the one property that makes
+// Config.Keys safe to read without a fallback: with no file at all every
+// action KeyActions names is present at its default, and nothing else is -
+// so the browser can look up any binding it knows and never find a hole.
+func TestKeysDefaultsWhenNoFileExists(t *testing.T) {
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Keys) != len(KeyActions) {
+		t.Errorf("len(Keys) = %d, want %d (one entry per KeyActions)", len(cfg.Keys), len(KeyActions))
+	}
+	for _, a := range KeyActions {
+		if got := cfg.Keys[a.Name]; got != a.Default {
+			t.Errorf("Keys[%q] = %q, want the default %q", a.Name, got, a.Default)
+		}
+		if got := cfg.Origins["keys."+a.Name]; got != OriginDefault {
+			t.Errorf("Origins[keys.%s] = %q, want %q", a.Name, got, OriginDefault)
+		}
+	}
+}
+
+// TestKeysFromFileOverrideQuitRebindsOneAction covers the file overriding a
+// single action: only that action leaves its default, it is attributed to the
+// file, and every other action is untouched (and still attributed to the
+// default).
+func TestKeysFromFileOverrideQuitRebindsOneAction(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := writeConfig(t, "[keys]\nquit = \"Q\"\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Keys["quit"]; got != "Q" {
+		t.Errorf("Keys[quit] = %q, want %q", got, "Q")
+	}
+	if got := cfg.Origins["keys.quit"]; got != OriginFile {
+		t.Errorf("Origins[keys.quit] = %q, want %q", got, OriginFile)
+	}
+	for _, a := range KeyActions {
+		if a.Name == "quit" {
+			continue
+		}
+		if got := cfg.Keys[a.Name]; got != a.Default {
+			t.Errorf("Keys[%q] = %q, want the untouched default %q", a.Name, got, a.Default)
+		}
+		if got := cfg.Origins["keys."+a.Name]; got != OriginDefault {
+			t.Errorf("Origins[keys.%s] = %q, want %q", a.Name, got, OriginDefault)
+		}
+	}
+}
+
+// TestKeysSwapArchivePairLoads covers the case the collision check must not
+// mistake for a mistake: archive and archive_shown trading their keys (a and
+// A) is a legal rebinding, because no key ends up owned by two actions - even
+// though each action alone changes the set of keys in play.
+func TestKeysSwapArchivePairLoads(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := writeConfig(t, "[keys]\narchive = \"A\"\narchive_shown = \"a\"\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("swapping the two archive keys is a legal rebinding, got: %v", err)
+	}
+	if cfg.Keys["archive"] != "A" || cfg.Keys["archive_shown"] != "a" {
+		t.Errorf("Keys = archive %q, archive_shown %q; want the two keys swapped", cfg.Keys["archive"], cfg.Keys["archive_shown"])
+	}
+}
+
+// TestKeysRejectBadEntries covers every way a [keys] entry can be wrong: an
+// action name nobody recognizes, a value that is not exactly one printable
+// non-space rune, a navigation key, and two actions left sharing a key. Each
+// message must name the offending key or both actions - a bare "invalid keys"
+// would leave the user to guess which line, the same reason the retain.sources
+// error names the offending source.
+func TestKeysRejectBadEntries(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"unknown action", "[keys]\nquits = \"Q\"\n", []string{"keys.quits", "unknown action", "quit"}},
+		{"two runes", "[keys]\nquit = \"ab\"\n", []string{"keys.quit", `"ab"`, "not a single key"}},
+		{"empty", "[keys]\nquit = \"\"\n", []string{"keys.quit", `""`, "not a single key"}},
+		{"space", "[keys]\nquit = \" \"\n", []string{"keys.quit", `" "`, "not a single key"}},
+		{"navigation letter", "[keys]\nquit = \"j\"\n", []string{"keys.quit", `"j"`, "navigation key"}},
+		{"navigation digit", "[keys]\nquit = \"5\"\n", []string{"keys.quit", `"5"`, "navigation key"}},
+		{"collision", "[keys]\narchive = \"A\"\n", []string{`"A"`, "archive", "archive_shown"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeConfig(t, c.content)
+			t.Setenv("LAZYRECALL_CONFIG", path)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("%s: expected a config error, got nil", c.name)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s: error %q does not contain %q", c.name, err.Error(), want)
+				}
+			}
+		})
+	}
+}
