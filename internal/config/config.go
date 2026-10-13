@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -205,6 +206,24 @@ type Group struct {
 	Color string
 }
 
+// KeyAction is one browser action whose key the [keys] table can change.
+type KeyAction struct{ Name, Default string }
+
+// KeyActions lists them in the order help shows them. Navigation is
+// deliberately not in the list: j k g G H J K L and the digits 0-9 are
+// fixed, and so are Ctrl-C, the arrows, Enter, Esc and Tab (see Config.Keys),
+// because the browser reads those before it ever consults a binding.
+var KeyActions = []KeyAction{
+	{"narrow", "/"}, {"search", "s"}, {"menu", "x"}, {"group", "p"},
+	{"clear_filters", "X"}, {"refresh", "R"},
+	{"prev_tab", "["}, {"next_tab", "]"}, {"next_match", "n"}, {"prev_match", "N"},
+	{"transcript_mode", "t"}, {"zoom", "z"}, {"view", "v"},
+	{"add_tag", "m"}, {"remove_tag", "M"}, {"remove_this_tag", "d"},
+	{"add_comment", "c"}, {"remove_comment", "C"}, {"rename", "r"},
+	{"archive", "a"}, {"archive_shown", "A"}, {"star", "*"}, {"show_all", "."},
+	{"help", "?"}, {"quit", "q"},
+}
+
 // Config is the effective configuration: defaults overlaid by the file, then
 // by environment, then by flags.
 type Config struct {
@@ -212,6 +231,16 @@ type Config struct {
 	Hide    Hide              `toml:"hide"`
 	Browse  Browse            `toml:"browse"`
 	Retain  Retain            `toml:"retain"`
+
+	// Keys maps a browser action's name to the key that triggers it,
+	// always fully populated: the defaults in KeyActions, overlaid by
+	// whatever the file's [keys] table set. It is read by the browser only
+	// - no other command looks at a binding, and a key that nothing
+	// rebinds stays exactly as it was. Navigation is outside this table
+	// entirely: j k g G H J K L and the digits 0-9 cannot be rebound, and
+	// neither can Ctrl-C, the arrow keys, Enter, Esc or Tab, which the
+	// browser reads as control flow before any action is chosen.
+	Keys map[string]string
 
 	// Groups is ordered, not a map: a session that matches more than one
 	// group's paths is resolved by longest-prefix match regardless of
@@ -272,6 +301,7 @@ type fileConfig struct {
 	Hide    Hide                 `toml:"hide"`
 	Browse  Browse               `toml:"browse"`
 	Retain  Retain               `toml:"retain"`
+	Keys    map[string]string    `toml:"keys"`
 	Groups  map[string]groupFile `toml:"groups"`
 	Labels  map[string]string    `toml:"labels"`
 }
@@ -409,7 +439,21 @@ func defaultConfig() Config {
 		// Labels is nil by default: every install falls back to its own
 		// name (internal/profile.Profile.Label).
 		Labels: nil,
+		// Keys is never nil: a config file that never mentions [keys] must
+		// still leave the browser every binding it had, so the defaults are
+		// materialized here rather than looked up lazily at the keypress.
+		Keys: defaultKeys(),
 	}
+}
+
+// defaultKeys is KeyActions turned into the map Config.Keys carries: every
+// action at its default key, before any [keys] entry overrides one.
+func defaultKeys() map[string]string {
+	m := make(map[string]string, len(KeyActions))
+	for _, a := range KeyActions {
+		m[a.Name] = a.Default
+	}
+	return m
 }
 
 // defaultOrigins seeds every configurable key with OriginDefault, so a config
@@ -430,6 +474,12 @@ func defaultOrigins(sources map[string]Source) map[string]Origin {
 		"retain.dir":           OriginDefault,
 		"browse.viewer":        OriginDefault,
 		"labels":               OriginDefault,
+	}
+	// Every rebindable action gets an origin up front, so `config show` can
+	// answer for a binding the file never touched without a nil check -
+	// the same reason every other configurable key is seeded here.
+	for _, a := range KeyActions {
+		m["keys."+a.Name] = OriginDefault
 	}
 	for name := range sources {
 		m["sources."+name+".roots"] = OriginDefault
@@ -552,6 +602,36 @@ func Load() (Config, error) {
 	if md.IsDefined("browse", "viewer") {
 		cfg.Browse.Viewer = file.Browse.Viewer
 		cfg.Origins["browse.viewer"] = OriginFile
+	}
+
+	// [keys] overlays the defaults one action at a time. The validation
+	// order matters: unknown names and malformed values are rejected per
+	// entry against the whole table of actions, and only after every entry
+	// is known-good is the collision check run, because two actions sharing
+	// a key is a property of the finished map, not of any one entry - a swap
+	// like archive = "A" with archive_shown = "a" only reads as a collision
+	// once both halves are in place.
+	if md.IsDefined("keys") {
+		for name, key := range file.Keys {
+			if !isKeyAction(name) {
+				names := make([]string, 0, len(KeyActions))
+				for _, a := range KeyActions {
+					names = append(names, a.Name)
+				}
+				return Config{}, fmt.Errorf("config %s: keys.%s: unknown action (known: %s)", path, name, strings.Join(names, ", "))
+			}
+			if !isSinglePrintableKey(key) {
+				return Config{}, fmt.Errorf("config %s: keys.%s: %q is not a single key", path, name, key)
+			}
+			if isNavigationKey(key) {
+				return Config{}, fmt.Errorf("config %s: keys.%s: %q is a navigation key and cannot be rebound", path, name, key)
+			}
+			cfg.Keys[name] = key
+			cfg.Origins["keys."+name] = OriginFile
+		}
+		if err := validateKeyCollisions(cfg.Keys); err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
 	}
 
 	for name, s := range file.Sources {
@@ -743,6 +823,63 @@ func validateRetainSources(sources []string) error {
 			continue
 		}
 		return fmt.Errorf("retain.sources: %q keeps no transcript file lazyrecall can copy (only claude, pi and omp do)", name)
+	}
+	return nil
+}
+
+// isKeyAction reports whether name is a browser action the [keys] table may
+// set, i.e. one of KeyActions. An unknown name is a load error rather than a
+// silently ignored entry: a typo'd action ("quit" for "quits", or a name
+// that only ever existed in an older version) would otherwise look applied
+// while the browser kept the old binding.
+func isKeyAction(name string) bool {
+	for _, a := range KeyActions {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// isSinglePrintableKey reports whether key is exactly one printable rune that
+// is not a space. The browser compares a keypress against the binding as a
+// single rune, so anything longer (a word, a multi-byte string), non-printing
+// (a control byte) or a space could never be triggered and would leave the
+// action unreachable with nothing to say why.
+func isSinglePrintableKey(key string) bool {
+	runes := []rune(key)
+	return len(runes) == 1 && runes[0] != ' ' && unicode.IsPrint(runes[0])
+}
+
+// isNavigationKey reports whether key is one of the movement keys the browser
+// reads before it consults a binding: j k g G H J K L and the digits 0-9.
+// Rebinding one of these would shadow a movement the list and transcript
+// panels still act on, so the file is rejected instead of quietly winning
+// over the built-in behavior - a bound key that only sometimes moves the
+// cursor is harder to explain than a startup error naming it.
+func isNavigationKey(key string) bool {
+	switch key {
+	case "j", "k", "g", "G", "H", "J", "K", "L":
+		return true
+	}
+	runes := []rune(key)
+	return len(runes) == 1 && runes[0] >= '0' && runes[0] <= '9'
+}
+
+// validateKeyCollisions rejects a finished key map in which two actions share
+// a key. It walks KeyActions rather than the map so the pair is reported in
+// the order help lists the actions, first-declared first - so an archive = "A"
+// that collides with the untouched archive_shown reads as "bound to both
+// archive and archive_shown", and a deliberate swap of the two reads the same
+// way.
+func validateKeyCollisions(keys map[string]string) error {
+	owner := make(map[string]string, len(keys))
+	for _, a := range KeyActions {
+		key := keys[a.Name]
+		if prev, ok := owner[key]; ok {
+			return fmt.Errorf("keys: %q is bound to both %s and %s", key, prev, a.Name)
+		}
+		owner[key] = a.Name
 	}
 	return nil
 }
