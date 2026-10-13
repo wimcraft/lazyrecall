@@ -4742,3 +4742,210 @@ func TestZoomWithNoSessionsDoesNothing(t *testing.T) {
 		t.Errorf("the frame was replaced by an empty detail pane:\n%s", m.View())
 	}
 }
+
+// ---------------------------------------------------------------------
+// Rebindable keys ([keys] config table)
+// ---------------------------------------------------------------------
+
+// keysFromDefaults builds a fully populated action -> key map - the shape
+// config.Config.Keys always has - and overlays the few a test rebinds, so a
+// test never has to restate the other twenty-odd defaults.
+func keysFromDefaults(overrides map[string]string) map[string]string {
+	m := make(map[string]string, len(config.KeyActions))
+	for _, a := range config.KeyActions {
+		m[a.Name] = a.Default
+	}
+	for name, key := range overrides {
+		m[name] = key
+	}
+	return m
+}
+
+// rebindBrowser is fixtureBrowser with a [keys] table applied, which is how
+// cmd/lazyrecall hands cfg.Keys to the browser.
+func rebindBrowser(t *testing.T, overrides map[string]string) *browseModel {
+	t.Helper()
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	return newTestBrowser(db, "claude-personal", BrowserOptions{
+		Installs: testInstalls("claude-personal", "claude-work"),
+		Keys:     keysFromDefaults(overrides),
+	})
+}
+
+// Swapping archive and archive_shown: each new key fires the action it now
+// names, and neither old key keeps firing what it used to.
+func TestRebindSwapsArchiveKeys(t *testing.T) {
+	m := rebindBrowser(t, map[string]string{"archive": "A", "archive_shown": "a"})
+	m = update(t, m, keyRunes("0"))
+	target := m.visible[0].LineageID
+
+	m = update(t, m, keyRunes("A"))
+	if got, err := annotate.IsArchived(m.db, target); err != nil {
+		t.Fatal(err)
+	} else if !got {
+		t.Fatal("A did not archive the selected session after the swap")
+	}
+	if m.pendingArchive != nil {
+		t.Error("A armed the bulk-archive confirmation instead of archiving the selected session")
+	}
+
+	m = update(t, m, keyRunes("a"))
+	if m.pendingArchive == nil {
+		t.Error("a did not start the bulk-archive confirmation after the swap")
+	}
+}
+
+// quit moved to Q: q runs nothing, Q quits.
+func TestRebindQuitKey(t *testing.T) {
+	m := rebindBrowser(t, map[string]string{"quit": "Q"})
+
+	nm, cmd := m.Update(keyRunes("q"))
+	m = nm.(*browseModel)
+	if cmd != nil {
+		t.Errorf("q returned a command (%T) after quit moved to Q", cmd)
+	}
+	if m.selectedOK {
+		t.Error("q selected a session after quit moved to Q")
+	}
+
+	nm, cmd = m.Update(keyRunes("Q"))
+	m = nm.(*browseModel)
+	if m.selectedOK {
+		t.Error("Q selected a session")
+	}
+	if cmd == nil {
+		t.Fatal("Q returned no command after being bound to quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("Q's command is %T, not a quit", cmd())
+	}
+}
+
+// zoom moved to Z: Z zooms, and while zoomed Z unzooms while z does
+// nothing - the binding, not the literal, decides both directions.
+func TestRebindZoomKeyWhileZoomed(t *testing.T) {
+	m := rebindBrowser(t, map[string]string{"zoom": "Z"})
+	m = update(t, m, keyRunes("Z"))
+	if !m.zoomed {
+		t.Fatal("Z did not zoom after the rebinding")
+	}
+	m = update(t, m, keyRunes("z"))
+	if !m.zoomed {
+		t.Error("z left the zoom even though it no longer names the zoom action")
+	}
+	m = update(t, m, keyRunes("Z"))
+	if m.zoomed {
+		t.Error("Z did not unzoom while zoomed")
+	}
+}
+
+// The footer and the ? overlay name the rebound keys and stop naming the
+// defaults, so neither can advertise a key that no longer does the action.
+func TestRebindFooterAndHelpNameTheBoundKeys(t *testing.T) {
+	m := rebindBrowser(t, map[string]string{"zoom": "Z", "quit": "Q"})
+	m = update(t, m, tea.WindowSizeMsg{Width: 200, Height: 40})
+	m = update(t, m, keyRunes("0"))
+
+	footer := m.footer()
+	if !strings.Contains(footer, "Z zoom") {
+		t.Errorf("footer %q does not advertise the rebound zoom key", footer)
+	}
+	if strings.Contains(footer, "z zoom") {
+		t.Errorf("footer %q still advertises the default zoom key", footer)
+	}
+	if !strings.Contains(footer, "Q, Ctrl-C quit") {
+		t.Errorf("footer %q does not advertise Q with its fixed Ctrl-C suffix", footer)
+	}
+
+	help := m.helpView()
+	if !strings.Contains(help, "  Z ") {
+		t.Errorf("help overlay does not show the rebound zoom key:\n%s", help)
+	}
+	if !strings.Contains(help, "Q, Ctrl-C") {
+		t.Errorf("help overlay does not show Q, Ctrl-C for quit:\n%s", help)
+	}
+	if strings.Contains(help, "  z ") {
+		t.Errorf("help overlay still advertises the default zoom key:\n%s", help)
+	}
+}
+
+// The search status line names a rebound next_match/prev_match.
+func TestRebindSearchStatusNamesTheBoundMatchKeys(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "L0", "claude:p:s0", "p", 1, map[string]any{
+		"source": "claude", "cwd": "/work/repo", "git_common_root": "/work/repo",
+		"topic": "the migration", "last_activity_at": 1700000000, "dir_exists": 1,
+		"transcript_path": writeScrollableTranscript(t),
+	})
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		Installs: testInstalls("claude-personal"),
+		Keys:     keysFromDefaults(map[string]string{"next_match": "e", "prev_match": "E"}),
+	})
+	m.tab = tabTranscript
+	m.textFilter = "migration"
+	m.View() // records the hit offsets searchStatus counts
+	if len(m.convo.hits) == 0 {
+		t.Fatal("the fixture recorded no hits; the assertion below proves nothing")
+	}
+
+	line := m.searchStatus()
+	if !strings.Contains(line, "e: next match, E: previous match") {
+		t.Errorf("search status %q does not name the rebound match keys", line)
+	}
+	if strings.Contains(line, "n: next match") {
+		t.Errorf("search status %q still advertises the default n", line)
+	}
+}
+
+// Every id a browseAction advertises must name a real [keys] action, and
+// every KeyAction must be advertised by exactly one row: a row whose id is
+// a typo would have no binding to read and would quietly fall back to the
+// literal, and an action missing from the table could never be rebound
+// visibly. Fixed-key rows (ids empty) are their own, unrebindable literals.
+func TestRebindTableCoversEveryActionExactlyOnce(t *testing.T) {
+	known := make(map[string]bool, len(config.KeyActions))
+	for _, a := range config.KeyActions {
+		known[a.Name] = true
+	}
+	seen := make(map[string]int, len(config.KeyActions))
+	for _, row := range browseActions {
+		for _, id := range row.ids {
+			if !known[id] {
+				t.Errorf("action row %q advertises unknown action id %q", row.key, id)
+				continue
+			}
+			seen[id]++
+		}
+	}
+	for _, a := range config.KeyActions {
+		if seen[a.Name] != 1 {
+			t.Errorf("action %q is advertised by %d table rows, want exactly 1", a.Name, seen[a.Name])
+		}
+	}
+}
+
+// Text typed into a prompt is text, never an action: with quit unbound from
+// q, typing q into the `/` filter still narrows by q.
+func TestRebindTypingInAnInputIsNotRemapped(t *testing.T) {
+	m := rebindBrowser(t, map[string]string{"quit": "Q"})
+	m = update(t, m, keyRunes("/"))
+	if m.mode != modeFilter {
+		t.Fatalf("`/` did not open the filter prompt (mode %v)", m.mode)
+	}
+	nm, _ := m.Update(keyRunes("q"))
+	m = nm.(*browseModel)
+	if m.mode != modeFilter {
+		t.Fatalf("typing q left the filter prompt (mode %v)", m.mode)
+	}
+	if m.selectedOK {
+		t.Error("typing q into the filter quit the browser")
+	}
+	if got := m.input.Value(); got != "q" {
+		t.Fatalf("filter input = %q, want the typed q", got)
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.textFilter != "q" {
+		t.Errorf("filter after enter = %q, want the typed q", m.textFilter)
+	}
+}

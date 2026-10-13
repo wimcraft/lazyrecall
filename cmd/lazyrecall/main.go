@@ -1889,6 +1889,7 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 		Viewer:        cfg.Browse.Viewer,
 		Installs:      discoverInstallsForBrowser,
 		InstallLabels: labels,
+		Keys:          cfg.Keys,
 	})
 	if err != nil {
 		return err
