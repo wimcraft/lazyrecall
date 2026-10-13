@@ -2,6 +2,7 @@ package annotate
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wimcraft/lazyrecall/internal/sqlitex"
@@ -23,6 +24,45 @@ func Archive(db *sqlitex.Runner, lineageID string) error {
 	// COALESCE(archived_at, now) preserves an existing timestamp instead of
 	// overwriting it, which is what makes a double-archive a no-op.
 	return db.Exec("UPDATE lineages SET archived_at = COALESCE(archived_at, " + pf.Ref("now") + ") WHERE id = " + pf.Ref("lineage_id") + ";")
+}
+
+// ArchiveMany archives every lineage in lineageIDs in a single statement,
+// with the same COALESCE(archived_at, now) Archive uses, so a lineage that
+// is already archived keeps its original timestamp. It exists for the
+// browser's "archive everything the list shows" action: Archive runs one
+// statement per id, and each Exec against the driver is a round trip, so a
+// few hundred rows would take a few hundred of them where this takes one.
+//
+// Every id is a bound parameter of one ParamFile, never interpolated into
+// the SQL string, and the IN list is built from the Refs alone - the ids
+// themselves never appear in the statement text. An empty slice is
+// answered without touching the database at all: there is nothing to
+// archive, and an `IN ()` is not valid SQL.
+func ArchiveMany(db *sqlitex.Runner, lineageIDs []string) error {
+	if len(lineageIDs) == 0 {
+		return nil
+	}
+	params := make(map[string]any, len(lineageIDs)+1)
+	params["now"] = time.Now().Unix()
+	fields := make([]string, 0, len(lineageIDs))
+	for i, id := range lineageIDs {
+		field := fmt.Sprintf("lineage_%d", i)
+		params[field] = id
+		fields = append(fields, field)
+	}
+	pf, err := db.WriteParams(params)
+	if err != nil {
+		return err
+	}
+	defer pf.Close()
+	// The IN list is this ParamFile's own Refs, built after registration so
+	// the tokens carry its id; the lineage ids themselves never appear in
+	// the statement text.
+	refs := make([]string, 0, len(fields))
+	for _, field := range fields {
+		refs = append(refs, pf.Ref(field))
+	}
+	return db.Exec("UPDATE lineages SET archived_at = COALESCE(archived_at, " + pf.Ref("now") + ") WHERE id IN (" + strings.Join(refs, ", ") + ");")
 }
 
 // Unarchive clears a lineage's archive flag, returning it to normal
