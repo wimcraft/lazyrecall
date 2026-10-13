@@ -830,8 +830,8 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALU
 		t.Fatalf("seeding v9 database: %v", err)
 	}
 
-	// CurrentVersion is 12 in this build (annotationOnly); bumping it one
-	// further simulates crossing a hypothetical v13 that is NOT
+	// CurrentVersion is 13 in this build (annotationOnly); bumping it one
+	// further simulates crossing a hypothetical v14 that is NOT
 	// annotation-only - annotationOnly has no entry for it, so it defaults
 	// to "needs a rebuild" exactly like every pre-v10 version did.
 	orig := CurrentVersion
@@ -953,4 +953,144 @@ func hasColumn(cols []struct {
 		}
 	}
 	return false
+}
+
+// TestFreshDatabaseHasSourcePathColumn covers the snapshot-source-path task:
+// a fresh install at the current schema version must have
+// snapshots.source_path without going through the migration path at all.
+func TestFreshDatabaseHasSourcePathColumn(t *testing.T) {
+	r := testRunner(t)
+	if _, err := Open(r); err != nil {
+		t.Fatal(err)
+	}
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(snapshots);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(cols, "source_path") {
+		t.Errorf("expected snapshots.source_path to exist on a fresh database, columns: %+v", cols)
+	}
+}
+
+// TestV12ToV13MigrationAddsSourcePathKeepsData covers a v12 database - the
+// version immediately below - gaining snapshots.source_path on the next
+// Open, and the backfill that fills it from the session rows. Like v11
+// before it, v13 is annotation-only: it touches nothing the disposable
+// index holds, so the index tables are seeded via indexDDL and the session
+// row must survive. A snapshot whose session row still exists gets that
+// session's transcript_path; one whose session row is already gone (its
+// agent file deleted and the row lost to an earlier rebuild) keeps a NULL
+// source_path, since there is nothing left to backfill it from.
+func TestV12ToV13MigrationAddsSourcePathKeepsData(t *testing.T) {
+	r := testRunner(t)
+
+	v12DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '12');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER, group_name TEXT, custom_name TEXT, starred_at INTEGER);
+CREATE UNIQUE INDEX idx_lineages_handle ON lineages(handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+CREATE TABLE snapshots (session_id TEXT PRIMARY KEY, path TEXT NOT NULL, source_size INTEGER NOT NULL, source_mtime INTEGER NOT NULL, copied_at INTEGER NOT NULL);
+` + indexDDL + `
+INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_1', 'p', 0, 1);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, transcript_path) VALUES ('claude:p:s1', 'claude', 's1', 'lin_1', 'completed', '/x/s1.jsonl');
+INSERT INTO snapshots (session_id, path, source_size, source_mtime, copied_at) VALUES ('claude:p:s1', '/snap/s1.jsonl', 10, 20, 30);
+INSERT INTO snapshots (session_id, path, source_size, source_mtime, copied_at) VALUES ('claude:p:gone', '/snap/gone.jsonl', 5, 6, 7);
+`
+	if err := r.Exec(v12DDL); err != nil {
+		t.Fatalf("seeding v12 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v12 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(snapshots);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(cols, "source_path") {
+		t.Errorf("expected snapshots.source_path to exist after migration, columns: %+v", cols)
+	}
+
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := r.Query(`SELECT id FROM sessions;`, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "claude:p:s1" {
+		t.Errorf("expected the seeded session to survive an annotation-only migration, got %+v", sessions)
+	}
+
+	var snaps []struct {
+		SessionID  string  `json:"session_id"`
+		SourcePath *string `json:"source_path"`
+	}
+	if err := r.Query(`SELECT session_id, source_path FROM snapshots ORDER BY session_id;`, &snaps); err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 2 {
+		t.Fatalf("expected two snapshot rows, got %+v", snaps)
+	}
+	if snaps[0].SessionID != "claude:p:gone" || snaps[0].SourcePath != nil {
+		t.Errorf("expected the orphaned snapshot to keep a NULL source_path, got %+v", snaps[0])
+	}
+	if snaps[1].SessionID != "claude:p:s1" || snaps[1].SourcePath == nil || *snaps[1].SourcePath != "/x/s1.jsonl" {
+		t.Errorf("expected the backfilled source_path to be the session's transcript_path, got %+v", snaps[1])
+	}
+}
+
+// TestV11ToV13MigrationCreatesSnapshotsWithSourcePath covers the other
+// migration shape: a database below v12 has no snapshots table at all when
+// the v13 migration runs (migrations run before annotationDDL), so the
+// migration's own CREATE must build the old shape and the ALTER must then
+// add the column. Opening must not error.
+func TestV11ToV13MigrationCreatesSnapshotsWithSourcePath(t *testing.T) {
+	r := testRunner(t)
+
+	v11DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '11');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER, group_name TEXT, custom_name TEXT, starred_at INTEGER);
+CREATE UNIQUE INDEX idx_lineages_handle ON lineages(handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+` + indexDDL + `
+INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_1', 'p', 0, 1);
+`
+	if err := r.Exec(v11DDL); err != nil {
+		t.Fatalf("seeding v11 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v11 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(snapshots);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(cols, "source_path") {
+		t.Errorf("expected snapshots.source_path to exist after migration from v11, columns: %+v", cols)
+	}
 }

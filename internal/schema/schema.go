@@ -152,7 +152,18 @@ import (
 // durable side, created by annotationDDL alongside lineages/comments/tags
 // rather than on the disposable index. v12 changes nothing the index holds,
 // so it is annotation-only.
-var CurrentVersion = 12
+//
+// v13 adds snapshots.source_path, the path the agent's own transcript file
+// was copied FROM, recorded alongside the copy. The copy exists precisely
+// because the agent deletes old transcripts, and a full rebuild
+// (refresh --full, or any non-annotation-only bump) drops the sessions row
+// of a session whose file is already gone - taking with it the only record
+// of where that file was. The copy must still say where it came from, so
+// re-indexing a copy into a fresh sessions row (T27) can restore the path
+// in transcript_path; a snapshot whose session row was already dropped
+// before this version keeps a NULL source_path. Like v12, v13 changes
+// nothing the index holds, so it is annotation-only.
+var CurrentVersion = 13
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -249,7 +260,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
 	path         TEXT NOT NULL,
 	source_size  INTEGER NOT NULL,
 	source_mtime INTEGER NOT NULL,
-	copied_at    INTEGER NOT NULL
+	copied_at    INTEGER NOT NULL,
+	source_path  TEXT
 );
 `
 
@@ -339,7 +351,43 @@ ALTER TABLE lineages ADD COLUMN custom_name TEXT;
 	11: `
 ALTER TABLE lineages ADD COLUMN starred_at INTEGER;
 `,
+	// v13 adds snapshots.source_path, the agent's own transcript path the
+	// copy was made from. The CREATE is for a database still below v12: the
+	// migrations run before annotationDDL, so the snapshots table may not
+	// exist yet when this runs, and it must be created with its old shape
+	// before the ALTER adds the new column. The backfill that fills
+	// source_path from the session rows is not here - see
+	// backfillSnapshotSourcePath - because it reads sessions.transcript_path,
+	// which a database below v8 still has the old sessions shape for; it
+	// runs once the index is at its current shape.
+	13: `
+CREATE TABLE IF NOT EXISTS snapshots (
+	session_id   TEXT PRIMARY KEY,
+	path         TEXT NOT NULL,
+	source_size  INTEGER NOT NULL,
+	source_mtime INTEGER NOT NULL,
+	copied_at    INTEGER NOT NULL
+);
+ALTER TABLE snapshots ADD COLUMN source_path TEXT;
+`,
 }
+
+// backfillSnapshotSourcePath fills snapshots.source_path from the session
+// rows it can still see, after the index is at its current shape. It cannot
+// live in migrations[13] with the column work above: the migrations run
+// before the index is (re)created, so on a database predating v8 - whose
+// sessions table is still the old shape - the subquery's transcript_path
+// column would not resolve. Run here instead, it sees every session row
+// that survived an annotation-only jump (the ones that still have a
+// snapshot to backfill) and none of the rows a rebuild just discarded -
+// those sessions are exactly the ones whose snapshot, if any, keeps a NULL
+// source_path because there is nothing left to take a path from. T27 skips
+// those. The UPDATE touches only rows still NULL, so it stays idempotent
+// across the opens that cross v13.
+const backfillSnapshotSourcePath = `
+UPDATE snapshots SET source_path = (SELECT transcript_path FROM sessions WHERE sessions.id = snapshots.session_id)
+WHERE source_path IS NULL;
+`
 
 // annotationOnly marks a schema version whose migration touches only the
 // durable annotation tables (lineages/comments/tags) and adds or changes
@@ -363,6 +411,7 @@ var annotationOnly = map[int]bool{
 	10: true,
 	11: true,
 	12: true,
+	13: true,
 }
 
 // Open ensures the database at r.DBPath exists with the current schema,
@@ -435,6 +484,15 @@ func Open(r *sqlitex.Runner) (int, error) {
 		}
 		if err := r.Exec(indexDDL); err != nil {
 			return 0, err
+		}
+		// The snapshots backfill runs last, once the index is at its current
+		// shape, and only when this open actually introduces the column
+		// (crossing below v13) - see backfillSnapshotSourcePath for why it
+		// cannot run beside the migration itself.
+		if stored < 13 {
+			if err := r.Exec(backfillSnapshotSourcePath); err != nil {
+				return 0, fmt.Errorf("schema: backfilling snapshots.source_path: %w", err)
+			}
 		}
 		if err := setVersion(r, CurrentVersion); err != nil {
 			return 0, err

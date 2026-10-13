@@ -116,15 +116,16 @@ func writeTranscript(t *testing.T, dir, name, body string) string {
 	return p
 }
 
-func snapshotRow(t *testing.T, db *sqlitex.Runner, sessionID string) (path string, size, mtime, copiedAt int64) {
+func snapshotRow(t *testing.T, db *sqlitex.Runner, sessionID string) (path string, size, mtime, copiedAt int64, sourcePath *string) {
 	t.Helper()
 	var rows []struct {
-		Path        string `json:"path"`
-		SourceSize  int64  `json:"source_size"`
-		SourceMtime int64  `json:"source_mtime"`
-		CopiedAt    *int64 `json:"copied_at"`
+		Path        string  `json:"path"`
+		SourceSize  int64   `json:"source_size"`
+		SourceMtime int64   `json:"source_mtime"`
+		CopiedAt    *int64  `json:"copied_at"`
+		SourcePath  *string `json:"source_path"`
 	}
-	q := `SELECT path, source_size, source_mtime, copied_at FROM snapshots WHERE session_id = '` + sessionID + `';`
+	q := `SELECT path, source_size, source_mtime, copied_at, source_path FROM snapshots WHERE session_id = '` + sessionID + `';`
 	if err := db.Query(q, &rows); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,30 @@ func snapshotRow(t *testing.T, db *sqlitex.Runner, sessionID string) (path strin
 	if rows[0].CopiedAt != nil {
 		copied = *rows[0].CopiedAt
 	}
-	return rows[0].Path, rows[0].SourceSize, rows[0].SourceMtime, copied
+	return rows[0].Path, rows[0].SourceSize, rows[0].SourceMtime, copied, rows[0].SourcePath
+}
+
+// TestSnapshotRecordsTheSourcePath covers the snapshot-source-path task: a
+// copy records the agent's own transcript path in snapshots.source_path, so
+// that a later rebuild which drops the session row still leaves the copy
+// saying where it came from - the path T27 re-indexes and T19 restores.
+func TestSnapshotRecordsTheSourcePath(t *testing.T) {
+	db := testDB(t)
+	src, dir := t.TempDir(), t.TempDir()
+	now := time.Unix(1_700_000_000, 0)
+
+	transcript := writeTranscript(t, src, "s.jsonl", "the body")
+	seedSession(t, db, session{id: "claude:p:1", source: "claude", install: "cc", sourceID: "1", lineage: "lin", transcriptPath: transcript})
+	annotate(t, db, "lin", "star")
+
+	if _, err := Snapshot(db, config.Retain{Annotated: true}, dir, now); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, _, sourcePath := snapshotRow(t, db, "claude:p:1")
+	if sourcePath == nil || *sourcePath != transcript {
+		t.Errorf("snapshots.source_path = %v, want %q", sourcePath, transcript)
+	}
 }
 
 // TestAnnotatedSessionsAreCopied covers the default keep rule: a session is
@@ -191,7 +215,7 @@ func TestAnnotatedSessionsAreCopied(t *testing.T) {
 		if perm := st.Mode().Perm(); perm != 0o600 {
 			t.Errorf("copy of %s has mode %o, want 600", id, perm)
 		}
-		p, size, _, copied := snapshotRow(t, db, "claude:p:"+id)
+		p, size, _, copied, _ := snapshotRow(t, db, "claude:p:"+id)
 		if p != dst || size != int64(len("body of "+id)) || copied != now.Unix() {
 			t.Errorf("snapshots row for %s = (%q, %d, %d), want (%q, %d, %d)", id, p, size, copied, dst, len("body of "+id), now.Unix())
 		}

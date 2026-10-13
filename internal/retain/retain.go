@@ -182,7 +182,7 @@ func Snapshot(db *sqlitex.Runner, rules config.Retain, dir string, now time.Time
 			res.fail(err)
 			continue
 		}
-		if err := upsertSnapshot(db, row.ID, dst, size, mtime, now.Unix()); err != nil {
+		if err := upsertSnapshot(db, row.ID, dst, row.TranscriptPath, size, mtime, now.Unix()); err != nil {
 			return res, err
 		}
 		res.Copied++
@@ -330,18 +330,23 @@ func copyFile(src, dst string) error {
 // upsertSnapshot records one copy in the durable snapshots table. The size
 // and mtime are the source file's own, not the copy's: they are what the
 // next pass compares the agent's file against to decide that the copy is
-// still current, and the copy's own mtime would drift with the copy.
-func upsertSnapshot(db *sqlitex.Runner, sessionID, path string, size, mtime, copiedAt int64) error {
+// still current, and the copy's own mtime would drift with the copy. The
+// source path is the agent's own transcript path the copy was made from,
+// kept so a session whose file is later deleted - and whose index row a
+// rebuild drops - can still be re-indexed from the copy with its original
+// path (T27).
+func upsertSnapshot(db *sqlitex.Runner, sessionID, path, sourcePath string, size, mtime, copiedAt int64) error {
 	b := db.NewBatch()
 	err := b.BulkUpsert("snapshots",
 		[]string{"session_id"},
-		[]string{"session_id", "path", "source_size", "source_mtime", "copied_at"},
+		[]string{"session_id", "path", "source_size", "source_mtime", "copied_at", "source_path"},
 		[]map[string]any{{
 			"session_id":   sessionID,
 			"path":         path,
 			"source_size":  size,
 			"source_mtime": mtime,
 			"copied_at":    copiedAt,
+			"source_path":  sourcePath,
 		}})
 	if err != nil {
 		return err
