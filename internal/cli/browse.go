@@ -147,6 +147,14 @@ type BrowserOptions struct {
 	// never depend on this machine's real config; nil is a valid "no labels
 	// known" value and every row falls back to showing its bare source.
 	InstallLabels map[string]string
+
+	// Keys is the action-name -> key map the [keys] config table may rebind
+	// (config.Config.Keys, always fully populated by the caller). nil - the
+	// zero value, and what every test that does not exercise rebinding
+	// leaves it at - means every action keeps the default in
+	// config.KeyActions, so a browser built without it behaves exactly as
+	// it did before rebinding existed.
+	Keys map[string]string
 }
 
 // discoverInstalls uses the injected lister, defaulting to the standard
@@ -598,6 +606,19 @@ type browseModel struct {
 
 	selected   search.Item
 	selectedOK bool
+
+	// keyIn and keyOut are the two directions of the [keys] rebinding table
+	// (change rebind-browser-keys), built once by newBrowseModel from
+	// BrowserOptions.Keys and never mutated afterwards. keyIn maps a
+	// *pressed* key to the default key the switches in handleBrowseKey and
+	// handleZoomedKey understand, so a rebound action reaches the same case
+	// it always did; keyOut maps an action name to the key it is advertised
+	// under, so the footer, the help overlay and the search status line
+	// name the key that actually fires. Both are nil in a browser built
+	// without Keys or with a hand-built model, and the handlers fall back
+	// to the pressed key itself when keyIn has no entry for it.
+	keyIn  map[string]string
+	keyOut map[string]string
 }
 
 // Init satisfies tea.Model: the browser needs no startup command beyond
@@ -626,6 +647,27 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 		transcriptMode: transcriptModeFromConfig(opts.Transcript),
 		viewer:         opts.Viewer,
 		dateHeaders:    opts.DateHeaders,
+		keyIn:          make(map[string]string, len(config.KeyActions)),
+		keyOut:         make(map[string]string, len(config.KeyActions)),
+	}
+	// keyIn/keyOut are built here, once, from the [keys] table (change
+	// rebind-browser-keys): keyOut records what each action is advertised
+	// under, keyIn maps that same key back to the default the handlers
+	// switch on. A second pass blanks the default of any action that moved
+	// away from a key nothing else took, so the old key does nothing rather
+	// than falling through unmapped and firing by accident.
+	for _, a := range config.KeyActions {
+		bound := opts.Keys[a.Name]
+		if bound == "" {
+			bound = a.Default
+		}
+		m.keyOut[a.Name] = bound
+		m.keyIn[bound] = a.Default
+	}
+	for _, a := range config.KeyActions {
+		if _, taken := m.keyIn[a.Default]; !taken {
+			m.keyIn[a.Default] = ""
+		}
 	}
 	// Command-line filters open as the corresponding panels' selections, so
 	// `lazyrecall browse --agent=pi` and walking to "pi" in the Agents panel
@@ -1192,7 +1234,18 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch string(msg.Runes) {
+	// The pressed key is remapped through keyIn to the default the cases
+	// below are written in terms of (change rebind-browser-keys): a rebound
+	// action arrives as its own key and lands on the same case it always
+	// did, and a key an action moved away from maps to "" and falls through
+	// doing nothing. Navigation and the digits are not in the table, so
+	// they pass through untouched.
+	k := string(msg.Runes)
+	if t, ok := m.keyIn[k]; ok {
+		k = t
+	}
+
+	switch k {
 	case "j":
 		m.move(1)
 	case "k":
@@ -1202,7 +1255,7 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		m.moveTo(1 << 30)
 	case "1", "2", "3", "4":
-		n, _ := strconv.Atoi(string(msg.Runes))
+		n, _ := strconv.Atoi(k)
 		m.setFocus(panelID(n - 1))
 	case "0":
 		// Sessions' jump key (change spatial-panel-navigation, renumbered
@@ -1312,7 +1365,16 @@ func (m *browseModel) handleZoomedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch string(msg.Runes) {
+	// Same remap as handleBrowseKey (change rebind-browser-keys): the
+	// zoomed handler is reached before that one's switch, so it maps the
+	// pressed key through keyIn itself. The set is deliberately smaller -
+	// only what the detail pane answers while it fills the frame.
+	k := string(msg.Runes)
+	if t, ok := m.keyIn[k]; ok {
+		k = t
+	}
+
+	switch k {
 	case "j":
 		m.move(1)
 	case "k":
@@ -3407,7 +3469,7 @@ func (m browseModel) footer() string {
 	var parts []string
 	for _, a := range browseActions {
 		if a.showsFor(m.focus) {
-			parts = append(parts, a.key+" "+a.label)
+			parts = append(parts, m.displayKey(a)+" "+a.label)
 		}
 	}
 	return style(truncateToWidth(strings.Join(parts, "  "), m.width), ansiDim, m.style)
@@ -3429,19 +3491,34 @@ func (m browseModel) searchStatus() string {
 	}
 	quoted := "'" + sanitizeSingleLine(phrase) + "'"
 
+	// The hints are built from the binding table the handlers read
+	// (change rebind-browser-keys): a rebound next_match/prev_match/search/
+	// clear_filters/narrow is named here as it is bound, so this line can
+	// never advertise a key that no longer does what it says. A model with
+	// no binding table at all (hand-built in a test) falls back to the
+	// config defaults through defaultKeyFor, exactly as displayKey does.
+	bound := func(name string) string {
+		if k := m.keyOut[name]; k != "" {
+			return k
+		}
+		return m.defaultKeyFor(name)
+	}
+	next, prev := bound("next_match"), bound("prev_match")
+	change, clear, narrow := bound("search"), bound("clear_filters"), bound("narrow")
+
 	var line string
 	if m.tab == tabTranscript && len(m.convo.hits) > 0 {
-		line = fmt.Sprintf("Search: matches for %s (%d of %d)  n: next match, N: previous match",
-			quoted, m.convo.hitIndex(m.detail.YOffset), len(m.convo.hits))
+		line = fmt.Sprintf("Search: matches for %s (%d of %d)  %s: next match, %s: previous match",
+			quoted, m.convo.hitIndex(m.detail.YOffset), len(m.convo.hits), next, prev)
 	} else if m.tab == tabTranscript {
 		line = fmt.Sprintf("Search: %s - no match in this transcript", quoted)
 	} else {
 		line = fmt.Sprintf("Search: %s (%d sessions)", quoted, len(m.visible))
 	}
 	if m.query != "" {
-		line += ",  s: change, X: clear"
+		line += fmt.Sprintf(",  %s: change, %s: clear", change, clear)
 	} else {
-		line += ",  /: change, esc: clear"
+		line += fmt.Sprintf(",  %s: change, esc: clear", narrow)
 	}
 	return style(truncateToWidth(line, m.width), ansiDim, m.style)
 }
@@ -3483,6 +3560,19 @@ func minInt(a, b int) int {
 
 type browseAction struct {
 	key string
+	// ids names the [keys] actions this row advertises, in display order,
+	// when the row's key is rebindable (change rebind-browser-keys). Empty
+	// means the row is a fixed key - navigation, enter, esc, the arrows -
+	// which nothing can rebind, so key is shown verbatim and must keep being
+	// the literal handleBrowseKey switches on. key outlives the ids as the
+	// row's own readable default (and the value help and the footer fall
+	// back to when the model carries no binding at all, e.g. a hand-built
+	// test model).
+	ids []string
+	// keySuffix is appended to the rendered key when ids is non-empty and
+	// something fixed rides along with them: the quit row's ", Ctrl-C",
+	// which Ctrl-C keeps regardless of any rebinding.
+	keySuffix string
 	// label is the footer form: short, because the footer is one line and
 	// shares it with every other action available right now. help is the
 	// descriptive form for the overlay, which has room for a sentence;
@@ -3549,27 +3639,61 @@ var browseActions = []browseAction{
 	{key: "enter", label: "resume", help: "resume the selected session", panels: []panelID{panelSessions}, footer: true},
 	{key: "enter", label: "filter", help: "filter the sessions by the selected value", panels: []panelID{panelGroups, panelAgents, panelRepos, panelTags}, footer: true},
 	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelGroups, panelAgents, panelRepos, panelTags}, footer: true},
-	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
-	{key: "n/N", label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
-	{key: "t", label: "clean/full", help: "on the Transcript tab, toggle between the clean question/answer view and the full technical transcript", panels: []panelID{panelSessions, panelDetail}},
-	{key: "z", label: "zoom", help: "zoom the detail pane to the whole frame, or back (esc also leaves)", panels: []panelID{panelSessions, panelDetail}, footer: true},
-	{key: "v", label: "view", help: "open the selected session's conversation as Markdown in the viewer (browse.viewer, else $PAGER, else less)", panels: []panelID{panelSessions, panelDetail}, footer: true},
-	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
-	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
-	{key: "x", label: "menu", help: "action menu for the focused panel - j/k or ↑/↓ move, enter applies, esc closes, / narrows by typing", footer: true},
-	{key: "p", label: "group", help: "file the selected session into a group, archive it, or return it to automatic - same j/k, enter, esc, / as the action menu", footer: true},
-	{key: "X", label: "clear all filters"},
-	{key: "R", label: "refresh the index"},
-	{key: "m/M", label: "add/remove a tag", help: "add/remove a tag on the selected session"},
-	{key: "d", label: "remove this tag", help: "take the tag under the cursor off the selected session", panels: []panelID{panelTags}, footer: true},
-	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
-	{key: "r", label: "rename", help: "set or clear lazyrecall's own name for the selected session (blank clears it)"},
-	{key: "a", label: "archive", help: "archive/unarchive the selected session", footer: true},
-	{key: "A", label: "archive shown", help: "archive every session the list shows, after a y/N confirmation", panels: []panelID{panelSessions}},
-	{key: "*", label: "star", help: "star/unstar the selected session", footer: true},
-	{key: ".", label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
-	{key: "?", label: "keys", help: "this list", footer: true},
-	{key: "q, Ctrl-C", label: "quit", footer: true},
+	{key: "[/]", ids: []string{"prev_tab", "next_tab"}, label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
+	{key: "n/N", ids: []string{"next_match", "prev_match"}, label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
+	{key: "t", ids: []string{"transcript_mode"}, label: "clean/full", help: "on the Transcript tab, toggle between the clean question/answer view and the full technical transcript", panels: []panelID{panelSessions, panelDetail}},
+	{key: "z", ids: []string{"zoom"}, label: "zoom", help: "zoom the detail pane to the whole frame, or back (esc also leaves)", panels: []panelID{panelSessions, panelDetail}, footer: true},
+	{key: "v", ids: []string{"view"}, label: "view", help: "open the selected session's conversation as Markdown in the viewer (browse.viewer, else $PAGER, else less)", panels: []panelID{panelSessions, panelDetail}, footer: true},
+	{key: "/", ids: []string{"narrow"}, label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
+	{key: "s", ids: []string{"search"}, label: "search phrase", help: "full-text search over your own prompts"},
+	{key: "x", ids: []string{"menu"}, label: "menu", help: "action menu for the focused panel - j/k or ↑/↓ move, enter applies, esc closes, / narrows by typing", footer: true},
+	{key: "p", ids: []string{"group"}, label: "group", help: "file the selected session into a group, archive it, or return it to automatic - same j/k, enter, esc, / as the action menu", footer: true},
+	{key: "X", ids: []string{"clear_filters"}, label: "clear all filters"},
+	{key: "R", ids: []string{"refresh"}, label: "refresh the index"},
+	{key: "m/M", ids: []string{"add_tag", "remove_tag"}, label: "add/remove a tag", help: "add/remove a tag on the selected session"},
+	{key: "d", ids: []string{"remove_this_tag"}, label: "remove this tag", help: "take the tag under the cursor off the selected session", panels: []panelID{panelTags}, footer: true},
+	{key: "c/C", ids: []string{"add_comment", "remove_comment"}, label: "add/remove a comment", help: "add/remove a comment on the selected session"},
+	{key: "r", ids: []string{"rename"}, label: "rename", help: "set or clear lazyrecall's own name for the selected session (blank clears it)"},
+	{key: "a", ids: []string{"archive"}, label: "archive", help: "archive/unarchive the selected session", footer: true},
+	{key: "A", ids: []string{"archive_shown"}, label: "archive shown", help: "archive every session the list shows, after a y/N confirmation", panels: []panelID{panelSessions}},
+	{key: "*", ids: []string{"star"}, label: "star", help: "star/unstar the selected session", footer: true},
+	{key: ".", ids: []string{"show_all"}, label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
+	{key: "?", ids: []string{"help"}, label: "keys", help: "this list", footer: true},
+	{key: "q, Ctrl-C", ids: []string{"quit"}, keySuffix: ", Ctrl-C", label: "quit", footer: true},
+}
+
+// displayKey is the key string to advertise for a: the action's bound keys,
+// joined by "/" and followed by any fixed suffix, when it has ids, else the
+// row's own literal (change rebind-browser-keys). With no binding at all -
+// a hand-built model, or a browser built with BrowserOptions.Keys nil - the
+// lookup misses and the literal key is shown, which is the default the rows
+// carry.
+func (m browseModel) displayKey(a browseAction) string {
+	if len(a.ids) == 0 {
+		return a.key
+	}
+	keys := make([]string, 0, len(a.ids))
+	for _, id := range a.ids {
+		k := m.keyOut[id]
+		if k == "" {
+			k = m.defaultKeyFor(id)
+		}
+		keys = append(keys, k)
+	}
+	return strings.Join(keys, "/") + a.keySuffix
+}
+
+// defaultKeyFor is the key config.KeyActions gives an action, for a model
+// whose keyOut was never built (a hand-built test model, or one that
+// deliberately exercises the nil-map path). It keeps displayKey honest in
+// exactly the cases where there is no binding to read.
+func (m browseModel) defaultKeyFor(name string) string {
+	for _, a := range config.KeyActions {
+		if a.Name == name {
+			return a.Default
+		}
+	}
+	return ""
 }
 
 func (m browseModel) helpView() string {
@@ -3580,7 +3704,7 @@ func (m browseModel) helpView() string {
 	}
 	b.WriteString(style(title, ansiBold, m.style) + "\n\n")
 	for _, a := range browseActions {
-		fmt.Fprintf(&b, "  %-14s %s%s\n", a.key, a.helpText(), a.scope())
+		fmt.Fprintf(&b, "  %-14s %s%s\n", m.displayKey(a), a.helpText(), a.scope())
 	}
 	b.WriteString("\nPanels: 1 Groups  2 Agents  3 Repos  4 Tags  0 Sessions  (tab reaches the detail pane)\n")
 	b.WriteString("\n")
