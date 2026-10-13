@@ -588,6 +588,14 @@ type browseModel struct {
 	help   bool // the full action list is showing
 	notice string
 
+	// pendingArchive holds the lineage ids the last `A` is asking about,
+	// awaiting a y/N answer (nil when no question is open). It is the one
+	// piece of state that makes the next keystroke an answer rather than an
+	// action, so setting it happens only after the count is known to be
+	// non-zero: an empty or all-archived list answers immediately and never
+	// leaves the browser waiting on a confirmation for nothing.
+	pendingArchive []string
+
 	selected   search.Item
 	selectedOK bool
 }
@@ -1145,6 +1153,9 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Alt {
 		return m, nil
 	}
+	if m.pendingArchive != nil {
+		return m.resolvePendingArchive(msg)
+	}
 	if m.zoomed {
 		return m.handleZoomedKey(msg)
 	}
@@ -1250,6 +1261,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startRenameInput()
 	case "a":
 		m.toggleArchive()
+	case "A":
+		m.startArchiveShown()
 	case "*":
 		m.toggleStar()
 	case "z":
@@ -1729,6 +1742,80 @@ func (m *browseModel) toggleArchive() {
 	m.notice = fmt.Sprintf("%s %s.", verb, it.SessionID)
 	m.detailOf = ""
 	m.loadAll()
+}
+
+// startArchiveShown is `A`: it arms the confirmation for archiving every
+// session the list currently shows - m.visible, exactly what is on screen
+// after every filter (repos, agents, groups, tags, the `/` text filter,
+// the search phrase) - rather than acting at once. A whole page of
+// sessions is worth one keystroke of confirmation even though archiving is
+// reversible with `a` or `archive --clear`.
+//
+// The ids are the visible items' distinct lineage ids, in list order,
+// skipping the ones already archived: two visible rows can share a lineage
+// (a continuation chain), archive state lives on the lineage, and
+// archiving an already-archived one would only be a no-op that inflates
+// the count. With nothing visible, or nothing unarchived among it, there is
+// no question to ask - the notice says why and no confirmation is armed.
+func (m *browseModel) startArchiveShown() {
+	seen := make(map[string]bool, len(m.visible))
+	ids := make([]string, 0, len(m.visible))
+	for _, it := range m.visible {
+		if it.Archived || seen[it.LineageID] {
+			continue
+		}
+		seen[it.LineageID] = true
+		ids = append(ids, it.LineageID)
+	}
+	switch {
+	case len(m.visible) == 0:
+		m.notice = "nothing to archive."
+		return
+	case len(ids) == 0:
+		m.notice = "every session shown is already archived."
+		return
+	}
+	m.pendingArchive = ids
+	m.notice = fmt.Sprintf("archive the %s shown? y: yes, any other key: no", sessionCount(len(ids)))
+}
+
+// resolvePendingArchive answers the `A` confirmation with the next
+// keystroke and does nothing else with it - the key that says no must not
+// also act as the key it would otherwise be (an `esc` answering the
+// question must not also clear the filter, a `j` must not move the cursor).
+// Only Ctrl-C keeps its global meaning and quits. m.pendingArchive is
+// cleared on every path, so the question is open for exactly one key.
+func (m *browseModel) resolvePendingArchive(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyCtrlC {
+		m.pendingArchive = nil
+		m.selectedOK = false
+		return m, tea.Quit
+	}
+	ids := m.pendingArchive
+	m.pendingArchive = nil
+	if msg.Type != tea.KeyRunes || string(msg.Runes) != "y" {
+		m.notice = "archive cancelled."
+		return m, nil
+	}
+	if err := annotate.ArchiveMany(m.db, ids); err != nil {
+		m.notice = "archive: " + err.Error()
+		return m, nil
+	}
+	m.notice = fmt.Sprintf("archived %s.", sessionCount(len(ids)))
+	m.detailOf = ""
+	m.loadAll()
+	return m, nil
+}
+
+// sessionCount renders n as "1 session" or "3 sessions" - both the
+// confirmation and its outcome name a count, and a count of one reading
+// "1 sessions" is the kind of small wrongness that makes a whole line look
+// untrustworthy.
+func sessionCount(n int) string {
+	if n == 1 {
+		return "1 session"
+	}
+	return fmt.Sprintf("%d sessions", n)
 }
 
 // toggleStar stars the selected session if it is unstarred and unstars it
@@ -3478,6 +3565,7 @@ var browseActions = []browseAction{
 	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
 	{key: "r", label: "rename", help: "set or clear lazyrecall's own name for the selected session (blank clears it)"},
 	{key: "a", label: "archive", help: "archive/unarchive the selected session", footer: true},
+	{key: "A", label: "archive shown", help: "archive every session the list shows, after a y/N confirmation", panels: []panelID{panelSessions}},
 	{key: "*", label: "star", help: "star/unstar the selected session", footer: true},
 	{key: ".", label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
 	{key: "?", label: "keys", help: "this list", footer: true},

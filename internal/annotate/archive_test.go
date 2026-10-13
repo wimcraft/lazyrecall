@@ -137,3 +137,77 @@ func TestArchiveSurvivesIndexRebuild(t *testing.T) {
 		t.Fatal("expected the session to still be archived after a full index rebuild")
 	}
 }
+
+// TestArchiveManyArchivesExactlyTheGivenLineages covers the browser's
+// "archive everything the list shows" path: one statement must archive
+// every id it was handed and leave every other lineage alone - a bulk
+// archive that spilled onto a neighbour would silently hide sessions the
+// user never confirmed.
+func TestArchiveManyArchivesExactlyTheGivenLineages(t *testing.T) {
+	db := testDB(t)
+	for _, id := range []string{"lin1", "lin2", "lin3"} {
+		seedLineageAndSession(t, db, id, "claude:p:"+id)
+	}
+
+	if err := ArchiveMany(db, []string{"lin1", "lin3"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"lin1", "lin3"} {
+		if archived, err := IsArchived(db, id); err != nil || !archived {
+			t.Fatalf("expected %s archived, got archived=%v err=%v", id, archived, err)
+		}
+	}
+	if archived, err := IsArchived(db, "lin2"); err != nil || archived {
+		t.Fatalf("expected lin2 untouched, got archived=%v err=%v", archived, err)
+	}
+}
+
+// TestArchiveManyKeepsExistingTimestamp is TestArchiveTwiceKeepsTimestamp
+// for the bulk path: a lineage that is already archived must keep the
+// timestamp it has, exactly as Archive's own COALESCE does. A bulk archive
+// run over a list that still contains an archived row - a stale visible
+// list, or a lineage reached twice - must not restamp it.
+func TestArchiveManyKeepsExistingTimestamp(t *testing.T) {
+	db := testDB(t)
+	for _, id := range []string{"lin1", "lin2"} {
+		seedLineageAndSession(t, db, id, "claude:p:"+id)
+	}
+	if err := Archive(db, "lin1"); err != nil {
+		t.Fatal(err)
+	}
+	before := storedArchivedAt(t, db, "lin1")
+	if before == nil {
+		t.Fatal("expected a timestamp after the first archive")
+	}
+
+	if err := ArchiveMany(db, []string{"lin1", "lin2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	after := storedArchivedAt(t, db, "lin1")
+	if after == nil || *before != *after {
+		t.Fatalf("expected the bulk archive to keep lin1's original timestamp: before=%v after=%v", *before, *after)
+	}
+	if archived, err := IsArchived(db, "lin2"); err != nil || !archived {
+		t.Fatalf("expected lin2 archived by the same statement, got archived=%v err=%v", archived, err)
+	}
+}
+
+// TestArchiveManyEmptySliceTouchesNothing: an empty list has nothing to
+// archive, and the statement it would build (`IN ()`) is not valid SQL, so
+// the empty case must return before touching the database at all.
+func TestArchiveManyEmptySliceTouchesNothing(t *testing.T) {
+	db := testDB(t)
+	seedLineageAndSession(t, db, "lin1", "claude:p:lin1")
+
+	if err := ArchiveMany(db, nil); err != nil {
+		t.Fatalf("ArchiveMany(nil) = %v, want nil", err)
+	}
+	if err := ArchiveMany(db, []string{}); err != nil {
+		t.Fatalf("ArchiveMany([]) = %v, want nil", err)
+	}
+	if archived, err := IsArchived(db, "lin1"); err != nil || archived {
+		t.Fatalf("an empty archive changed lin1: archived=%v err=%v", archived, err)
+	}
+}

@@ -1425,6 +1425,269 @@ func TestArchiveKeyRemovesTheRow(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------
+// "A" archives every session the list shows
+// ---------------------------------------------------------------------
+
+// visibleLineageIDs are the distinct lineage ids of a browser's visible
+// list, in list order - the exact set `A` must archive once confirmed.
+func visibleLineageIDs(m *browseModel) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, it := range m.visible {
+		if seen[it.LineageID] {
+			continue
+		}
+		seen[it.LineageID] = true
+		out = append(out, it.LineageID)
+	}
+	return out
+}
+
+// TestArchiveShownConfirmsThenArchivesEveryVisibleLineage is the core of
+// the change: `A` asks first, archives nothing until `y`, and then
+// archives exactly the lineages that were visible while leaving every
+// other lineage alone.
+func TestArchiveShownConfirmsThenArchivesEveryVisibleLineage(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m.tags.Sel = "wip" // L0 and L2 - narrows the list to two rows
+	m.rebuild()
+	if len(m.visible) != 2 {
+		t.Fatalf("the tag filter left %d sessions, want 2", len(m.visible))
+	}
+	want := visibleLineageIDs(m)
+
+	m = update(t, m, keyRunes("A"))
+	if m.pendingArchive == nil {
+		t.Fatal("A did not arm a confirmation")
+	}
+	if !strings.Contains(m.notice, "2 sessions") {
+		t.Errorf("confirmation notice %q does not name the count", m.notice)
+	}
+	for _, id := range want {
+		if archived, err := annotate.IsArchived(m.db, id); err != nil {
+			t.Fatal(err)
+		} else if archived {
+			t.Fatalf("%s was archived before the confirmation was answered", id)
+		}
+	}
+
+	m = update(t, m, keyRunes("y"))
+	if m.pendingArchive != nil {
+		t.Error("the confirmation is still open after y answered it")
+	}
+	if m.notice != "archived 2 sessions." {
+		t.Errorf("notice after y = %q", m.notice)
+	}
+	for _, id := range want {
+		if archived, err := annotate.IsArchived(m.db, id); err != nil {
+			t.Fatal(err)
+		} else if !archived {
+			t.Fatalf("%s was visible and is not archived after y", id)
+		}
+	}
+	for _, id := range []string{"L1", "L3", "L4", "L5", "L6"} {
+		if archived, err := annotate.IsArchived(m.db, id); err != nil {
+			t.Fatal(err)
+		} else if archived {
+			t.Fatalf("%s was not visible and must not be archived", id)
+		}
+	}
+	if len(m.visible) != 0 {
+		t.Errorf("%d rows are still listed after archiving every visible session, want none", len(m.visible))
+	}
+}
+
+// The confirmation's "no" must answer the question and do nothing else: an
+// `n` must not move, and an `esc` must not also clear the filter it would
+// clear with no question open.
+func TestArchiveShownCancelledByNOrEsc(t *testing.T) {
+	for _, key := range []tea.KeyMsg{keyRunes("n"), {Type: tea.KeyEsc}} {
+		m := fixtureBrowser(t)
+		m = update(t, m, keyRunes("0"))
+		m = update(t, m, keyRunes("j")) // move off the first row
+		before := m.cursor
+		m.textFilter = "lazyrecall"
+		m.rebuild()
+		filtered := len(m.visible)
+
+		m = update(t, m, keyRunes("A"))
+		if m.pendingArchive == nil {
+			t.Fatalf("%v: A did not arm a confirmation", key)
+		}
+		m = update(t, m, key)
+		if m.pendingArchive != nil {
+			t.Errorf("%v: the confirmation is still open", key)
+		}
+		if m.notice != "archive cancelled." {
+			t.Errorf("%v: notice = %q, want the cancellation", key, m.notice)
+		}
+		if m.textFilter != "lazyrecall" || len(m.visible) != filtered {
+			t.Errorf("%v: the answering key also changed the filter (%q, %d rows)", key, m.textFilter, len(m.visible))
+		}
+		if m.cursor != before {
+			t.Errorf("%v: the answering key also moved the cursor from %d to %d", key, before, m.cursor)
+		}
+		for _, it := range m.all {
+			if it.Archived {
+				t.Errorf("%v: %s was archived despite the cancellation", key, it.SessionID)
+			}
+		}
+	}
+}
+
+// With ShowAll on, already-archived rows are visible alongside the rest,
+// and the count `A` asks about must exclude them: they are already
+// archived, archiving them again would be a no-op, and the number the user
+// confirms has to be the number that changes.
+func TestArchiveShownCountsOnlyUnarchivedRows(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	seedLineageOverride(t, db, "L0", "", true)
+	seedLineageOverride(t, db, "L1", "", true)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		ShowAll: true, Installs: testInstalls("claude-personal"),
+	})
+	m = update(t, m, keyRunes("0"))
+	if len(m.visible) != 7 {
+		t.Fatalf("with ShowAll on the list shows %d sessions, want all 7", len(m.visible))
+	}
+
+	m = update(t, m, keyRunes("A"))
+	if !strings.Contains(m.notice, "5 sessions") {
+		t.Errorf("confirmation notice %q does not exclude the two archived rows", m.notice)
+	}
+	if len(m.pendingArchive) != 5 {
+		t.Errorf("pending confirmation holds %d lineages, want 5", len(m.pendingArchive))
+	}
+
+	m = update(t, m, keyRunes("y"))
+	if got := storedArchivedCount(t, m.db); got != 7 {
+		t.Errorf("after confirming, %d of 7 lineages are archived, want all 7", got)
+	}
+}
+
+// storedArchivedCount counts the archived lineages directly, for the test
+// that has to tell "the five unarchived rows were archived" apart from
+// "all seven ended up archived".
+func storedArchivedCount(t *testing.T, db *sqlitex.Runner) int {
+	t.Helper()
+	ids, err := annotate.AllArchived(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ids)
+}
+
+// An empty list has nothing to ask about, and nothing to confirm: `A`
+// explains itself and the very next key must behave as though `A` was
+// never pressed - in particular a `y` must not archive anything.
+func TestArchiveShownOnAnEmptyListAsksNothing(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m.textFilter = "no session contains this string"
+	m.rebuild()
+	if len(m.visible) != 0 {
+		t.Fatalf("the filter left %d sessions, want none", len(m.visible))
+	}
+
+	m = update(t, m, keyRunes("A"))
+	if m.notice != "nothing to archive." {
+		t.Errorf("notice = %q, want %q", m.notice, "nothing to archive.")
+	}
+	if m.pendingArchive != nil {
+		t.Error("A armed a confirmation for an empty list")
+	}
+
+	m = update(t, m, keyRunes("y"))
+	if got := storedArchivedCount(t, m.db); got != 0 {
+		t.Errorf("y after the empty-list notice archived %d lineages", got)
+	}
+	if m.pendingArchive != nil {
+		t.Error("y left a confirmation open")
+	}
+}
+
+// When every visible row is already archived (ShowAll on, everything
+// archived), there is again no question worth asking - the count would be
+// zero - so the notice says so and no confirmation is armed.
+func TestArchiveShownWhenEveryRowIsArchived(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	for i := range 7 {
+		if err := annotate.Archive(db, fmt.Sprintf("L%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		ShowAll: true, Installs: testInstalls("claude-personal"),
+	})
+	m = update(t, m, keyRunes("0"))
+
+	m = update(t, m, keyRunes("A"))
+	if m.notice != "every session shown is already archived." {
+		t.Errorf("notice = %q", m.notice)
+	}
+	if m.pendingArchive != nil {
+		t.Error("A armed a confirmation when every visible row is already archived")
+	}
+}
+
+// The confirmation names a single session in the singular.
+func TestArchiveShownOneSessionIsSingular(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m.agents.Sel = "pi"
+	m.tags.Sel = "wip"
+	m.rebuild() // L2: the only wip session, and pi
+	if len(m.visible) != 1 {
+		t.Fatalf("the filters left %d sessions, want 1", len(m.visible))
+	}
+
+	m = update(t, m, keyRunes("A"))
+	if !strings.Contains(m.notice, "archive the 1 session shown?") {
+		t.Errorf("confirmation for one session = %q", m.notice)
+	}
+	m = update(t, m, keyRunes("y"))
+	if m.notice != "archived 1 session." {
+		t.Errorf("notice after archiving one session = %q", m.notice)
+	}
+}
+
+// "A" is discoverable: the help overlay lists it, and the footer does not
+// advertise it - it is a bulk action, not one of the common ones worth a
+// footer column.
+func TestArchiveShownAppearsInHelpButNotTheFooter(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	if !strings.Contains(m.helpView(), "archive every session the list shows") {
+		t.Error("the help overlay does not list A")
+	}
+	if strings.Contains(m.footer(), "archive shown") {
+		t.Error("the footer advertises A, which is deliberately not a footer action")
+	}
+}
+
+// The zoomed handler does not get A: the frame it draws has no session list
+// to read a count off, so arming a confirmation there would archive
+// something the user cannot see.
+func TestArchiveShownIsNotBoundWhileZoomed(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("z"))
+	if !m.zoomed {
+		t.Fatal("z did not zoom")
+	}
+	m = update(t, m, keyRunes("A"))
+	if m.pendingArchive != nil {
+		t.Error("A armed an archive confirmation while zoomed")
+	}
+	if got := storedArchivedCount(t, m.db); got != 0 {
+		t.Errorf("A while zoomed archived %d lineages", got)
+	}
+}
+
 // "." toggles showAll, and with it on the sessions the hide rules
 // suppressed reappear; toggling again hides them.
 func TestDotTogglesShowAll(t *testing.T) {
